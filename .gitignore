@@ -1,0 +1,13 @@
+/.venv
+/.idea
+__pycache__/
+*.pyc
+/log/
+/result/
+/.claude
+bak_old
+docs
+prompt
+test
+test_result_example_prompt
+run_tests.bat
