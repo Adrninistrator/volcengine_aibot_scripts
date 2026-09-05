@@ -84,8 +84,11 @@ def main() -> int:
     ap.add_argument("queries_file", nargs="?", default=None,
                     help="客户话术文件（每行一句，空行跳过；缺省进入交互模式）")
     ap.add_argument("--var", action="append", default=[], metavar="KEY=VALUE",
-                    help="覆盖对话变量（可多次，如 coupon_a_lock_term=3）；"
-                         "缺省使用测试版本变量当前值")
+                    help="会话级对话变量 KEY=VALUE（--var 可重复传入以一次指定多个，"
+                         "如 --var coupon_a_lock_term=3 --var bce_jiangjia=8）；"
+                         "仅在对话首次请求时生效且整段会话不变，覆盖剧本测试版本"
+                         "全局变量的同名变量（不改测试版本全局变量）；"
+                         "未指定时使用测试版本全局变量")
     ap.add_argument("--encoding", default="utf-8",
                     help="话术文件编码（默认 utf-8，可传 gbk）")
     ap.add_argument("--no-analysis", action="store_true",

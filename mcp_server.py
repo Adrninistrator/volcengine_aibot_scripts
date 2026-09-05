@@ -205,7 +205,7 @@ export_script → import_script(导出文件, 项目组名) → publish_preview(
   {"coupon_a_lock_term": 3}（值统一按字符串提交）；
 - ⚠ 必填变量（is_required=true）赋值时值不能为空，传空值会被拒绝；
 - 修改的是测试版本（Preview）变量取值，不影响线上；
-- start_dialog 默认使用这些值作为对话变量（也可用 overrides 覆盖）。
+- start_dialog 默认使用测试版本全局变量作为对话变量；overrides 为会话级变量，会覆盖同名变量（仅本段会话生效，不改测试版本全局变量），未指定时使用测试版本全局变量。
 
 修改后验证话术链路：
 query_variables → update_variable → publish_preview → start_dialog ...
@@ -256,7 +256,8 @@ publish_preview(script_id, description?)
 调用序列：
 1. start_dialog(script_id, overrides?) →
    新建会话 + 机器人开场白；返回 session_id、robot_texts、variables
-   （overrides 可覆盖对话变量，如 {"coupon_a_lock_term": 3}）
+   （overrides 为会话级变量，覆盖剧本测试版本全局变量的同名变量，
+   仅本段会话生效；未指定时使用剧本测试版本全局变量）
 2. say_to_robot(session_id, text) → 客户说一句，返回机器人回复 robot_texts、
    当前节点 node、session_completed；
    - session_completed=true：机器人已挂机，勿再发言，直接 end_dialog；
@@ -717,8 +718,9 @@ def start_dialog(script_id: str, overrides: dict | None = None) -> dict:
     ⚠ 占用生产实际外呼资源：请勿同时发起大量会话，建议晚上测试。
 
     - script_id: 剧本ID（llm_xxx）
-    - overrides: 可选，对话变量覆盖，如 {"coupon_a_lock_term": 3}；
-      缺省使用测试版本变量当前值
+    - overrides: 可选，会话级对话变量，如 {"coupon_a_lock_term": 3}；
+      仅在本段会话首次请求（start_dialog）时生效且整段会话不变，会覆盖剧本测试版本
+      全局变量的同名变量（不改测试版本全局变量）；未指定时使用剧本测试版本全局变量的当前值
     返回 session_id（后续 say_to_robot / end_dialog 使用）、robot_texts（开场白）。
     剧本未发布会报错，请先 publish_preview。
     """
