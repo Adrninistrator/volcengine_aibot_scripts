@@ -12,7 +12,7 @@
     python scripts/get_current_user.py
     python scripts/get_current_user.py --save-allowed   # 将当前账号设为允许账号
 
-结果文件：result/{时间_获取当前登录的账号}/user.json
+结果文件：result/{时间_账号_获取当前登录的账号}/user.json
 """
 
 from __future__ import annotations

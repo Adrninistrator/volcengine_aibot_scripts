@@ -8,7 +8,7 @@
 用法：
     python scripts/query_script.py llm_xxx
 
-结果文件：result/{时间_根据剧本ID查询剧本}/script.json
+结果文件：result/{时间_账号_根据剧本ID查询剧本}/script.json
 """
 
 from __future__ import annotations

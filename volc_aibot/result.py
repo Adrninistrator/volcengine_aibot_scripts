@@ -2,23 +2,50 @@
 """结果文件目录管理。
 
 约定（prompt 要求）：结果文件写入项目根 result/ 目录，
-每次运行生成一个 {当前时间_功能描述} 子目录，如：
-    result/20260903_201530_导出剧本/【存客】multi-agent v2.json
+每次运行生成一个 {当前时间_当前查询到的火山引擎账号_功能描述} 子目录，如：
+    result/20260903_201530_2105888584_导出剧本/【存客】multi-agent v2.json
+
+账号注入方式（三层，互为补充）：
+- VolcAIBotClient 构造时通过 set_account_provider 注册账号提供者，
+  new_result_dir 惰性调用（在线脚本/MCP/Web 自动生效）；
+- get_current_user/get_current_account 命中时通过 set_result_account
+  直接注入（守卫/显式查询过账号的进程免去重复请求）；
+- 提供者不可用（离线搜索、Cookie 服务未启动）时降级为
+  {时间_功能描述}，不影响主流程。
 """
 
 from __future__ import annotations
 
 import json
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import PROJECT_ROOT
 
 RESULT_DIR = PROJECT_ROOT / "result"
 
+# 批量导出剧本目录名的固定后缀（prompt 约定：以「_批量导出剧本」结尾，
+# 且其他功能的目录名不含该关键字；搜索导出内容按此后缀定位目录）
+EXPORT_DIR_SUFFIX = "_批量导出剧本"
+
+# 批量下载分析Agent目录名的固定后缀（prompt 2026-09-06：以
+# 「_批量下载分析Agent」结尾，内含各分析Agent 系统提示词 md 文件与
+# 清单.json；搜索下载内容按此后缀定位目录）
+AGENTS_DIR_SUFFIX = "_批量下载分析Agent"
+
 _SAFE = re.compile(r'[\\/:*?"<>|\r\n\t ]+')
+
+# 账号上下文（进程级）：provider 由 client 注册；_account 为已解析账号；
+# _failed 标记 provider 本次进程已失败（避免每次建目录都重试网络）。
+# RLock：_resolve_account 持锁调 provider，provider 内 set_result_account
+# 会再次取锁（同线程可重入）。
+_account_lock = threading.RLock()
+_account_provider: Callable[[], str] | None = None
+_account: str = ""
+_account_failed: bool = False
 
 
 def _safe_name(text: str) -> str:
@@ -27,10 +54,62 @@ def _safe_name(text: str) -> str:
     return cleaned[:80] or "result"
 
 
+def set_account_provider(provider: Callable[[], str] | None) -> None:
+    """注册账号提供者（client 构造时注册，返回账号字符串，可能抛异常）。"""
+    global _account_provider
+    with _account_lock:
+        _account_provider = provider
+
+
+def set_result_account(account: str) -> None:
+    """直接记录当前账号（get_current_user 命中时注入；目录名使用）。"""
+    global _account
+    with _account_lock:
+        _account = _sanitize_account(account)
+
+
+def reset_result_account() -> None:
+    """清空账号上下文（测试隔离用）。"""
+    global _account, _account_failed
+    with _account_lock:
+        _account = ""
+        _account_failed = False
+
+
+def _sanitize_account(account: str) -> str:
+    """账号仅保留数字（登录账号为数字 ID），最长 20 位。"""
+    return re.sub(r"\D", "", str(account or ""))[:20]
+
+
+def _resolve_account() -> str:
+    """解析当前账号：已注入直接用；否则经 provider 查询一次（失败降级）。"""
+    global _account, _account_failed
+    with _account_lock:
+        if _account:
+            return _account
+        if _account_failed or _account_provider is None:
+            return ""
+        try:
+            account = _sanitize_account(_account_provider())
+        except Exception:
+            _account_failed = True   # 本次进程不再重试（离线场景常见）
+            return ""
+        if account:
+            _account = account
+            return account
+        _account_failed = True
+        return ""
+
+
 def new_result_dir(desc: str) -> Path:
-    """创建并返回 result/{YYYYMMDD_HHMMSS}_{功能描述}/ 子目录。"""
+    """创建并返回 result/{YYYYMMDD_HHMMSS}_{账号}_{功能描述}/ 子目录。
+
+    账号获取不到（离线/失败）时退化为 {YYYYMMDD_HHMMSS}_{功能描述}。
+    """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    d = RESULT_DIR / f"{ts}_{_safe_name(desc)}"
+    account = _resolve_account()
+    d = RESULT_DIR / f"{ts}_{account}_{_safe_name(desc)}" if account else \
+        RESULT_DIR / f"{ts}_{_safe_name(desc)}"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

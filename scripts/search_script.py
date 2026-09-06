@@ -9,7 +9,7 @@
     python scripts/search_script.py "【存客】multi-agent v2"
     python scripts/search_script.py "multi-agent" --max-pages 10
 
-结果文件：result/{时间_根据剧本名称搜索剧本}/scripts.json
+结果文件：result/{时间_账号_根据剧本名称搜索剧本}/scripts.json
 """
 
 from __future__ import annotations

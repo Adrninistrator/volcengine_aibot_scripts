@@ -11,7 +11,7 @@
 用法：
     python scripts/query_variables.py llm_xxx
 
-结果文件：result/{时间_查询剧本变量}/variables.json
+结果文件：result/{时间_账号_查询剧本变量}/variables.json
 """
 
 from __future__ import annotations

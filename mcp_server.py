@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """火山引擎智能外呼 MCP 服务（SSE，默认端口 19000，支持配置）。
 
-把 12 个独立脚本功能全部封装为 MCP 工具（共 19 个），供 AI 调用：
+把 17 个独立脚本功能全部封装为 MCP 工具（共 26 个），供 AI 调用：
 - 使用说明：usage_guide（运行前提、各工具用法、典型调用序列）
 - 账号：get_current_user（获取当前登录账号；所有工具内置账号守卫）
 - 项目组/剧本：query_project_groups、list_group_scripts、query_script、
@@ -11,6 +11,12 @@
   delete_variable、set_preview_variables
 - 文本对话测试（模式二，任意轮数）：
   start_dialog / say_to_robot / is_dialog_active / end_dialog / list_dialogs
+- 剧本基本信息/Sub Agent（2026-09-06 新增）：
+  query_script_info、get_sub_agents、get_sub_agent_info
+- 分析Agents（CloudLadder 域，2026-09-06 新增）：
+  query_analysis_agents、get_analysis_agent
+- 批量导出与内容搜索（2026-09-06 新增）：
+  batch_export_scripts、search_exported_scripts
 
 兼容 mcp SDK 1.x（FastMCP）与 2.x（MCPServer）两个大版本。
 
@@ -25,7 +31,7 @@
 未配置账号时报错提示先到配置页设置。
 
 运行前提：
-1) install.bat 安装依赖（requests mcp uvicorn sse-starlette）；
+1) install.bat 安装依赖（requests mcp uvicorn sse-starlette websockets）；
 2) chrome_capture_operate 服务运行中（默认 http://127.0.0.1:33445），
    日常 Chrome 已登录火山引擎控制台（Cookie 经插件推送，实时查询获取）。
 
@@ -55,7 +61,8 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from volc_aibot import global_config                     # noqa: E402
-from volc_aibot.client import VolcAIBotClient             # noqa: E402
+from volc_aibot.client import (VolcAIBotClient,            # noqa: E402
+                                  agent_mode_name)
 from volc_aibot.config import VARIABLE_TYPES              # noqa: E402
 from volc_aibot.logging_util import setup_logging         # noqa: E402
 from volc_aibot.result import new_result_dir, safe_filename, \
@@ -136,7 +143,8 @@ def tool_with_detail(fn):
 
 def _log_tool_error(fn, e: Exception) -> None:
     try:
-        _client.logger.error("工具 %s 执行失败: %s", fn.__name__, e)
+        # 完整堆栈（prompt 2026-09-06：日志记录详细异常堆栈）
+        _client.logger.exception("工具 %s 执行失败: %s", fn.__name__, e)
     except Exception:  # noqa: BLE001 - 日志失败不影响透出
         pass
 
@@ -166,7 +174,7 @@ _USAGE_GUIDE = {
 3. end_dialog(session_id) → 意向评级 + 对话摘要（结果写入 result 目录）
 
 其他主题：usage_guide("scripts") / ("variables") / ("import_export")
-/ ("publish") / ("faq")，或 "all" 查看全部。"""
+/ ("publish") / ("agents_info") / ("faq")，或 "all" 查看全部。"""
 ),
 "scripts": (
 """## 剧本查询/搜索/导出/导入
@@ -214,7 +222,7 @@ query_variables → update_variable → publish_preview → start_dialog ...
 "import_export": (
 """## 导入/导出剧本
 
-- export_script(script_id)：导出剧本 JSON（写入 result/{时间_导出剧本}/），
+- export_script(script_id)：导出剧本 JSON（写入 result/{时间_账号_导出剧本}/），
   返回 export_file 路径、文件名、大小；
 - import_script(file_path, group_name)：
   - file_path：export_script 返回的 export_file（原样文件，含服务端 checksum，
@@ -287,6 +295,40 @@ publish_preview(script_id, description?)
   现象，服务端疑点），对话全文已保存至 result 目录；
 - import_script 被拒：必须用 export_script 导出的原样文件（含 checksum）；
 - “变量 xxx 不存在”：调用名称（key）拼写问题，先 query_variables。"""
+),
+"agents_info": (
+"""## 剧本基本信息 / Sub Agent / 分析Agents
+
+**剧本基本信息（query_script_info）**
+- query_script_info(script_id)：一次返回 prompt 所需全字段——项目组/
+  剧本名称/剧本类型（1=纯PE型 2=Multi Agents 3=对话流程编排）/
+  最大对话轮次/最大模型出错次数/挂机关键词（;分隔）/LLM 模型/
+  ASR 引用热词表/ASR 上传上下文（开启/未开启）/挂载的分析Agent
+  （信息抽取/线索定级/通话总结 各 ID/名称/状态/更新时间）/
+  测试版本与线上版本发布（版本号/状态/更新时间）；
+- 结果写入 result/{时间_账号_查询剧本基本信息}/。
+
+**Sub Agent（Multi Agents 剧本）**
+- get_sub_agents(script_id)：Sub Agent 清单（ID/名称/顺序）；
+- get_sub_agent_info(script_id, sub_agent_id)：单个 Sub Agent 的
+  LLM 模型与提示词配置（提示词全文落盘 result 目录，返回摘要+文件路径，
+  提示词可达 60KB，不要整段读入对话）。
+
+**分析Agents（独立于剧本，CloudLadder 域）**
+- query_analysis_agents(type?)：分析Agent 列表（名称/ID/状态 已发布/
+  未发布/更新时间）；type 为 通话总结/信息抽取/线索定级，可省略查全部；
+- get_analysis_agent(agent_id)：详情——系统提示词/用户提示词/状态/
+  更新时间/模型参数（提示词全文落盘 result 目录，返回摘要+文件路径）。
+
+**批量导出与关键字搜索**
+- batch_export_scripts(group_names?)：按项目组（多个或全部）批量导出
+  剧本，目录名含当前火山账号（区分环境）且以「_批量导出剧本」结尾，
+  内含 清单.json（项目组/剧本ID/剧本名称，亦记录账号）；
+- search_exported_scripts(export_dir?, keyword, with_count?)：在导出
+  目录中按行搜索关键字，返回 项目组/剧本ID/剧本名称/是否出现/出现次数
+  （with_count=false 时次数为空）。export_dir 省略时取最新导出目录。
+  典型用法：先 batch_export_scripts 导出，再 search_exported_scripts
+  检查全部剧本内容是否含某关键字。"""
 ),
 }
 
@@ -904,6 +946,365 @@ def get_current_user() -> dict:
     user = _get_client().get_current_user()
     return {"account": str(user.get("id")), "username": user.get("username"),
             "email": user.get("email"), "type": user.get("type")}
+
+
+# ---------------------------------------------------------------- 剧本基本信息/Sub Agent/分析Agents（2026-09-06 新增）
+
+@mcp.tool()
+@tool_with_detail
+def query_script_info(script_id: str) -> dict:
+    """查询剧本基本信息（汇总多接口，一次返回全字段）。
+
+    返回：项目组、剧本ID/名称、剧本类型（1=纯PE型 Agent 2=Multi Agents
+    3=对话流程编排 Agent）、最大对话轮次、最大模型出错次数、
+    Agent 回复自动挂机关键词（;分隔）、LLM 模型、
+    语音识别（ASR）设置-引用热词表、语音识别（ASR）设置-上传上下文
+    （开启/未开启）、**非真人接听识别开关（answer_recognize_enabled
+    开启/未开启）与识别后播报内容（answer_recognize_text，三种剧本类型
+    均返回，页面 UI 仅在对话流程编排提供编辑入口）**、
+    挂载的分析Agents（信息抽取/线索定级/通话总结，
+    各含 ID/名称/状态/更新时间）、测试版本与线上版本发布
+    （版本号/状态/更新时间）。
+    结果同时写入 result/{时间_账号_查询剧本基本信息}/。
+    """
+    info = _get_client().get_script_info(script_id)
+    import datetime
+    for a in (info.get("analysis_agents") or {}).values():
+        ts = a.get("update_time")
+        a["update_time_text"] = (
+            datetime.datetime.fromtimestamp(int(ts) / 1000).strftime(
+                "%Y-%m-%d %H:%M:%S") if ts else "")
+    out_dir = new_result_dir("查询剧本基本信息")
+    out_json = write_json(out_dir / f"{safe_filename(script_id)}.json", info)
+    return {"info": info, "result_file": str(out_json)}
+
+
+@mcp.tool()
+@tool_with_detail
+def get_sub_agents(script_id: str) -> dict:
+    """查询 Multi Agents 剧本的 Sub Agent 清单（ID/名称/顺序）。
+
+    返回 {sub_agents: [{sub_agent_id, sub_agent_name, agent_mode}...]}；
+    非 Multi Agents 剧本返回空列表。
+    """
+    subs = _get_client().get_sub_agents(script_id)
+    return {"script_id": script_id, "total": len(subs),
+            "sub_agents": [
+                {"sub_agent_id": s.get("SubAgent", {}).get("SubAgentID"),
+                 "sub_agent_name": s.get("SubAgent", {}).get("SubAgentName"),
+                 "agent_mode": s.get("SubAgent", {}).get("AgentMode")}
+                for s in subs]}
+
+
+@mcp.tool()
+@tool_with_detail
+def get_sub_agent_info(script_id: str, sub_agent_id: str) -> dict:
+    """查询单个 Sub Agent 的 LLM 模型与提示词配置。
+
+    返回 ModelType（LLM 模型名）与提示词全文（系统/开场白）；
+    提示词可达 60KB，全文落盘 result/{时间_账号_查询SubAgent配置}/，
+    返回摘要（长度+前200字）与文件路径，供按需 Read 读取分析。
+    """
+    client = _get_client()
+    prompt_cfg = client.get_prompt_config(script_id, sub_agent_id=sub_agent_id)
+    config = client.get_script_config(script_id, sub_agent_id=sub_agent_id)
+    only = prompt_cfg.get("PromptOnlyConfig") or {}
+    prologue = only.get("Prologue") or {}
+    sys_prompt = only.get("CustomPrompt") or ""
+    out_dir = new_result_dir("查询SubAgent配置")
+    out_json = write_json(out_dir / f"{safe_filename(script_id)}_"
+                          f"{safe_filename(sub_agent_id)}.json",
+                          {"script_id": script_id,
+                           "sub_agent_id": sub_agent_id,
+                           "prompt_config": prompt_cfg, "config": config})
+    return {
+        "script_id": script_id, "sub_agent_id": sub_agent_id,
+        "model_type": prompt_cfg.get("ModelType") or "",
+        "system_prompt_len": len(sys_prompt),
+        "system_prompt_head": sys_prompt[:200],
+        "prologue_fixed_text": prologue.get("FixedTextStr") or "",
+        "latest_updated_version": prompt_cfg.get("LatestUpdatedVersion"),
+        "latest_updated_user": prompt_cfg.get("LatestUpdatedUser"),
+        "result_file": str(out_json),
+    }
+
+
+@mcp.tool()
+@tool_with_detail
+def query_analysis_agents(agent_type: str | None = None) -> dict:
+    """查询分析Agent列表（CloudLadder 域，独立于剧本）。
+
+    参数 agent_type：通话总结/信息抽取/线索定级（短名/全名/DSA 等标识
+    均可，可省略=全部）。
+    返回 {agents: [{name, id, type, status(已发布/未发布),
+    update_time_text}...], total}。
+    """
+    client = _get_client()
+    from volc_aibot.client import ladder_type_alias_map
+    type_ids: list[str] | None = None
+    if agent_type:
+        tid = ladder_type_alias_map().get(agent_type)
+        if tid is None:
+            raise _ToolError(f"未知类型 {agent_type}；可选: "
+                             "通话总结/信息抽取/线索定级（或 DSA/BDE/BLG）")
+        type_ids = [tid]
+    agents, total = client.list_cloud_ladder_agents(type_identifiers=type_ids)
+    import datetime
+    rows = []
+    for a in agents:
+        ts = a.get("UpdateTime")
+        rows.append({
+            "name": a.get("Name") or "", "id": a.get("AgentId") or "",
+            "type": a.get("Type") or "",
+            "status": client.ladder_agent_status(a),
+            "update_time_text": (
+                datetime.datetime.fromtimestamp(int(ts) / 1000).strftime(
+                    "%Y-%m-%d %H:%M:%S") if ts else ""),
+        })
+    return {"agents": rows, "total": total}
+
+
+@mcp.tool()
+@tool_with_detail
+def get_analysis_agent(agent_id: str) -> dict:
+    """获取分析Agent内容：系统提示词/用户提示词/状态/更新时间/模型参数。
+
+    提示词全文落盘 result/{时间_账号_获取分析Agent内容}/{AgentID}.json（含
+    AgentConfig 原始结构），返回摘要（提示词长度+前200字/模型名/状态）
+    与文件路径，供按需 Read 读取分析。
+    """
+    client = _get_client()
+    agent_config = client.get_cloud_ladder_agent_config(agent_id)
+    summary = ((agent_config.get("GeneralAgentConfig") or {})
+               .get("SummaryAgentConfig") or {})
+    tmpl_sys = tmpl_user = ""
+    for t in summary.get("InputTmpls") or []:
+        if t.get("Role") == 1:
+            tmpl_sys = t.get("Text") or ""
+        elif t.get("Role") == 2:
+            tmpl_user = t.get("Text") or ""
+    model = summary.get("ModelParam") or {}
+    agents, _ = client.list_cloud_ladder_agents(agent_ids=[agent_id])
+    info = agents[0] if agents else {}
+    import datetime
+    ts = info.get("UpdateTime")
+    out_dir = new_result_dir("获取分析Agent内容")
+    out_json = write_json(out_dir / f"{safe_filename(agent_id)}.json", {
+        "agent_id": agent_id, "name": info.get("Name"),
+        "type": info.get("Type"),
+        "status": client.ladder_agent_status(info) if info else "未知",
+        "update_time": ts,
+        "model": model, "system_prompt": tmpl_sys,
+        "user_prompt": tmpl_user, "agent_config": agent_config,
+    })
+    return {
+        "agent_id": agent_id, "name": info.get("Name") or "",
+        "type": info.get("Type") or "",
+        "status": client.ladder_agent_status(info) if info else "未知",
+        "update_time_text": (
+            datetime.datetime.fromtimestamp(int(ts) / 1000).strftime(
+                "%Y-%m-%d %H:%M:%S") if ts else ""),
+        "model": model.get("ModelName") or "",
+        "endpoint": model.get("Endpoint") or "",
+        "temperature": model.get("Temperature"),
+        "system_prompt_len": len(tmpl_sys),
+        "system_prompt_head": tmpl_sys[:200],
+        "user_prompt": tmpl_user,
+        "result_file": str(out_json),
+    }
+
+
+# ---------------------------------------------------------------- 批量导出与关键字搜索（2026-09-06 新增）
+
+@mcp.tool()
+@tool_with_detail
+def batch_export_scripts(group_names: list[str] | None = None,
+                         concurrency: int | None = None) -> dict:
+    """批量导出剧本：按项目组导出其下全部剧本（不指定=全部项目组）。
+
+    参数 concurrency：获得剧本清单后的并行导出数（默认 5，范围 1~10；
+    实测并发 5 提速约 3.7x 且无错误，过高有服务端频控风险）。
+    返回 {export_dir（以 _批量导出剧本 结尾，目录名含当前火山账号）,
+    total, exported, failed, scripts:[{项目组/剧本ID/剧本名称/导出文件}]}；
+    目录内含 清单.json（亦记录账号，区分环境）。
+    注意：项目组较多/剧本较多时耗时相应增加（并发导出）。
+    """
+    import time as _time
+    from volc_aibot.result import EXPORT_DIR_SUFFIX
+    from volc_aibot.concurrency import clamp_concurrency, run_parallel
+    from volc_aibot import progress
+    c = clamp_concurrency(concurrency)
+    # 事件归属「批量导出」面板（web 快捷工具批量搜索页同款展示）
+    progress.set_source("export")
+    _start = _time.perf_counter()
+    try:
+        return _batch_export_impl(group_names, c)
+    finally:
+        elapsed_s = round(_time.perf_counter() - _start, 1)
+        progress.set_source("")
+
+
+def _batch_export_impl(group_names, c) -> dict:
+    import time as _time
+    from volc_aibot.result import EXPORT_DIR_SUFFIX
+    from volc_aibot.concurrency import run_parallel
+    from volc_aibot import progress
+    _start = _time.perf_counter()
+    client = _get_client()
+    groups = client.query_project_groups()
+    if group_names:
+        wanted = set(group_names)
+        selected = [g for g in groups if g.get("group_name") in wanted]
+        missing = wanted - {g.get("group_name") for g in selected}
+        if missing:
+            raise _ToolError(f"项目组不存在: {sorted(missing)}；"
+                             "先 query_project_groups 查可用名称")
+    else:
+        selected = groups
+    if not selected:
+        raise _ToolError("未找到任何项目组（检查账号权限）")
+
+    # 账号写入目录名（prompt 约定 {时间_账号_功能描述}，区分环境）
+    account = client.get_current_account()
+    out_dir = new_result_dir(EXPORT_DIR_SUFFIX)
+
+    manifest: list[dict] = []
+    exported = failed = 0
+    for g in selected:
+        gid = g["id"]
+        gname = g.get("group_name") or str(gid)
+        scripts = client.list_group_all_scripts(gid)
+
+        # 并发导出（prompt 2026-09-06：获得剧本后并行执行导出操作）
+        def export_one(s: dict):
+            sid = s.get("AgentID") or ""
+            filename, content = client.export_script(sid)
+            path = out_dir / safe_filename(
+                f"{safe_filename(gname)}_{safe_filename(filename)}")
+            path.write_bytes(content)
+            return {"export_file": path.name, "size_bytes": len(content)}
+
+        def on_progress(s: dict, index: int, total: int) -> None:
+            progress.report_stage(
+                f"导出剧本 {s.get('AgentID') or ''}", group=gname,
+                script_id=s.get("AgentID") or "",
+                script_name=s.get("AgentName") or "",
+                index=index, total=total)
+
+        results = run_parallel(scripts, export_one, concurrency=c,
+                               progress=on_progress)
+        for s, r in zip(scripts, results):
+            sid = s.get("AgentID") or ""
+            row = {"project_group": gname, "script_id": sid,
+                   "script_name": s.get("AgentName") or "",
+                   "agent_mode_name": agent_mode_name(s.get("AgentMode"))}
+            if isinstance(r, tuple) and r and r[0] == "error":
+                row["error"] = str(r[1])[:200]
+                failed += 1
+            else:
+                row.update(r)
+                exported += 1
+            manifest.append(row)
+    write_json(out_dir / "清单.json", {
+        "account": str(account), "total": len(manifest),
+        "exported": exported, "failed": failed, "scripts": manifest})
+    # 完成事件：页面清空计时并显示完成提示（含总耗时）
+    elapsed_s = round(_time.perf_counter() - _start, 1)
+    progress.report_done(
+        f"批量导出完成：成功 {exported}/{len(manifest)}"
+        + (f"，{failed} 个失败" if failed else ""),
+        elapsed_s=elapsed_s, total=len(manifest), exported=exported,
+        failed=failed, export_dir=str(out_dir))
+    return {"export_dir": str(out_dir), "account": str(account),
+            "total": len(manifest), "exported": exported,
+            "failed": failed, "scripts": manifest}
+
+
+@mcp.tool()
+@tool_with_detail
+def search_exported_scripts(keyword: str,
+                            export_dir: str | None = None,
+                            with_count: bool = False) -> dict:
+    """在「批量导出剧本」目录的导出文件中按行搜索关键字。
+
+    参数：
+    - keyword：要搜索的关键字；
+    - export_dir：批量导出目录（省略=取最新一次导出目录）；
+    - with_count：是否统计出现次数（默认 False，仅判定是否出现）。
+    返回 {total, hits, results: [{项目组/剧本ID/剧本名称/剧本类型/
+    关键字/是否出现/出现次数}]}（剧本类型取自导出清单；
+    with_count=False 时出现次数为空）。
+    """
+    from volc_aibot.result import EXPORT_DIR_SUFFIX, RESULT_DIR
+    if not keyword:
+        raise _ToolError("缺少 keyword（要搜索的关键字）")
+
+    def _find_export_dirs() -> list[Path]:
+        if not RESULT_DIR.is_dir():
+            return []
+        return sorted((d for d in RESULT_DIR.iterdir()
+                       if d.is_dir()
+                       and d.name.endswith(EXPORT_DIR_SUFFIX)),
+                      reverse=True)
+
+    def _load_manifest(d: Path) -> dict:
+        mf = d / "清单.json"
+        if not mf.is_file():
+            return {}
+        return {row.get("export_file", ""): row
+                for row in json.loads(
+                    mf.read_text(encoding="utf-8")).get("scripts", [])}
+
+    def _search_file(path: Path, kw: str) -> tuple[bool, int]:
+        found, count = False, 0
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if kw in line:
+                        found = True
+                        count += line.count(kw)
+        except OSError:
+            pass
+        return found, count
+
+    target: Path | None
+    if export_dir:
+        p = Path(export_dir)
+        if not p.is_absolute():
+            p = (RESULT_DIR / export_dir
+                 if (RESULT_DIR / export_dir).exists() else p)
+        target = p if p.is_dir() else None
+    else:
+        dirs = _find_export_dirs()
+        target = dirs[0] if dirs else None
+    if target is None:
+        raise _ToolError("导出目录不存在（先 batch_export_scripts），"
+                         "或指定正确的 export_dir")
+
+    manifest = _load_manifest(target)
+    files = sorted(p for p in target.iterdir()
+                   if p.is_file() and p.suffix == ".json"
+                   and p.name != "清单.json")
+    results: list[dict] = []
+    for p in files:
+        meta = manifest.get(p.name) or {}
+        found, count = _search_file(p, keyword)
+        results.append({"project_group": meta.get("project_group", ""),
+                        "script_id": meta.get("script_id", ""),
+                        "script_name": meta.get("script_name", ""),
+                        "agent_mode_name": meta.get("agent_mode_name", ""),
+                        "keyword": keyword,
+                        "found": found,
+                        "found_text": "是" if found else "否",
+                        "count": count if with_count else ""})
+    out_dir = new_result_dir("搜索已导出剧本内容关键字")
+    write_json(out_dir / "结果.json", {
+        "export_dir": str(target), "keyword": keyword,
+        "with_count": with_count, "results": results})
+    hits = [r for r in results if r["found"]]
+    return {"export_dir": str(target), "total": len(results),
+            "hits": len(hits), "results": results,
+            "result_file": str(out_dir / "结果.json")}
 
 
 # ---------------------------------------------------------------- 入口

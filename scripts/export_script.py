@@ -12,7 +12,7 @@
 用法：
     python scripts/export_script.py llm_xxx
 
-结果文件：result/{时间_导出剧本}/{剧本名}.json + info.json
+结果文件：result/{时间_账号_导出剧本}/{剧本名}.json + info.json
 """
 
 from __future__ import annotations

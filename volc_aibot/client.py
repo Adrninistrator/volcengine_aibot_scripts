@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
 import threading
 import time
 import urllib.parse
@@ -43,6 +44,71 @@ BOT_MGMT_REFERER = f"{BASE_URL}/aibot/bot-management-llm"
 # 控制台页面 referer（不同功能所在页面路径不同，按抓包原样使用）
 PAGE_MULTI_AGENT = "multi-agent"      # 剧本编辑/变量/发布 页
 PAGE_TEXT_TESTING = "text-testing"    # 文本测试（对话）页
+
+# 分析Agents（CloudLadder）服务域与类型标识（2026-09-06 抓包实证：
+# 剧本配置页「信息抽取/线索定级/通话总结」下拉与 Agents 管理页均走
+# igh.bytedance.com 的 Sca/CloudLadder 接口，鉴权用 JWT，非 Cookie）
+CLOUD_LADDER_BASE = "https://igh.bytedance.com"
+LADDER_AGENT_TYPES = {
+    "DSA": "外呼-通话总结",
+    "BDE": "外呼-信息抽取",
+    "BLG": "外呼-线索定级",
+}
+
+# 剧本类型（agent/list 的 AgentMode 数值 -> 名称；批量导出清单记录，
+# 批量搜索结果展示「剧本类型」列，prompt 2026-09-06）
+AGENT_MODE_NAMES = {
+    1: "纯PE型 Agent",
+    2: "Multi Agents",
+    3: "对话流程编排 Agent",
+}
+
+
+def agent_mode_name(mode) -> str:
+    """AgentMode 数值 -> 剧本类型名称（未知值返回原值字符串）。"""
+    return AGENT_MODE_NAMES.get(mode, str(mode or ""))
+
+# 剧本 config DialogAnalysisCfg 中分析Agent挂载键名（2026-09-06 15:45
+# 抓包实证：llm_tvok_cdjci 同时挂载 3 类，值均为字符串 AgentId）
+LADDER_SCRIPT_AGENT_KEYS = {
+    "DataExtractAgent": "外呼-信息抽取",    # BDE...
+    "LeadsGradingAgent": "外呼-线索定级",   # BLG...
+    "DialogSummaryAgent": "外呼-通话总结",  # DSA...
+}
+
+
+def _agent_id_list(value) -> list[str]:
+    """DialogAnalysisCfg 键值 -> AgentId 列表（兼容 str 与 list 形态）。
+
+    值为字符串直接判；为列表时逐项判（防同一类型挂多个）。仅接受
+    BDE/BLG/DSA 前缀的分析Agent ID，其余（空值/其他域 ID）忽略。
+    """
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    out = []
+    for v in items:
+        s = str(v or "").strip()
+        if s and re.match(r"^(BDE|BLG|DSA)[0-9A-Za-z]*$", s):
+            out.append(s)
+    return out
+
+
+def ladder_type_alias_map() -> dict[str, str]:
+    """分析Agent类型别名 -> TypeIdentifier（脚本/MCP 共用的类型入参归一）。
+
+    接受三种写法（大小写敏感）：全名「外呼-信息抽取」、短名「信息抽取」
+    （去掉“外呼-”前缀）、类型标识「BDE」——与脚本/MCP 文档中的写法一致。
+    """
+    alias: dict[str, str] = {}
+    for tid, name in LADDER_AGENT_TYPES.items():
+        alias[tid] = tid
+        alias[name] = tid
+        short = name.removeprefix("外呼-")
+        alias[short] = tid
+    return alias
+LADDER_REFERER_AGENTS = (f"{CLOUD_LADDER_BASE}"
+                         "/ladder/portal/agents/agent?inner=true&source=aibot")
 
 
 class ApiError(RuntimeError):
@@ -113,6 +179,17 @@ class VolcAIBotClient:
         self.enforce_account = enforce_account
         self._checked_cookie: str = ""         # 已通过检查的 cookie 头快照
         self._checked_account: str = ""        # 该 cookie 对应的已校验账号
+        # ---- CloudLadder JWT（分析Agents 域，与 Cookie 快照绑定缓存） ----
+        self._ladder_token: tuple[str, str] = ("", "")
+        # ---- 当前登录用户（与 Cookie 快照绑定缓存；结果目录名含账号） ----
+        self._user_cache: tuple[str, dict] = ("", {})
+        # ---- 项目组名映射/项目级热词表（client 级缓存，批量场景共享） ----
+        self._group_names: dict[int, str] | None = None
+        self._hotwords_cache: tuple[int, list] | None = None   # (project, tables)
+        # 结果目录名含账号（prompt 约定）：注册账号提供者，new_result_dir
+        # 惰性查询（get_current_user 命中时也会直接注入，见下）
+        from .result import set_account_provider
+        set_account_provider(self.get_current_account)
 
     # ---------------------------------------------------------------- 会话/Cookie
 
@@ -156,17 +233,29 @@ class VolcAIBotClient:
         """获取当前登录的账号（GET /console/api/v2/user，返回 id 即账号）。
 
         响应 data：{id: 账号(数字), username, email, type, avatar}。
+        与 Cookie 快照绑定缓存（同一登录态不重复请求）；命中后把账号
+        注入结果目录命名（prompt：{时间_账号_功能描述}）。
         """
+        snap = self._cookie_snapshot()
+        if self._user_cache[0] and self._user_cache[0] == snap:
+            return self._user_cache[1]
         body = self._request_json(
             "GET", f"{BASE_URL}/console/api/v2/user",
-            referer=BOT_MGMT_REFERER, skip_account_guard=True)
+            referer=BOT_MGMT_REFERER, skip_account_guard=True,
+            what="获取当前登录账号")
         data = unwrap(body, "获取当前登录账号") or {}
         if not isinstance(data, dict) or data.get("id") is None:
             raise ApiError(f"获取当前登录账号返回结构异常: {str(data)[:200]}")
+        self._user_cache = (snap, data)
+        try:
+            from .result import set_result_account
+            set_result_account(str(data.get("id")))
+        except Exception:  # noqa: BLE001 - 注入失败不影响业务返回
+            pass
         return data
 
     def get_current_account(self) -> str:
-        """当前登录账号（数字字符串）。"""
+        """当前登录账号（数字字符串；同一登录态走缓存）。"""
         return str(self.get_current_user().get("id"))
 
     def _cookie_snapshot(self) -> str:
@@ -269,12 +358,14 @@ class VolcAIBotClient:
                      referer: str = "",
                      accept: str | None = None,
                      skip_account_guard: bool = False,
-                     mutating: bool = False) -> requests.Response:
+                     mutating: bool = False,
+                     what: str = "") -> requests.Response:
         """发 HTTP 请求；遇 401/403 刷新 Cookie 后重试一次。
 
         skip_account_guard：仅 /user 接口自身（获取账号）与内部调用设 True。
         mutating：修改类操作（发布/变量修改/赋值），账号守卫对未配置/
         不匹配账号直接拦截；查询类只预检提示不拦截。
+        what：请求用途描述（日志与进度事件用；空则用 method+path）。
         """
         if not skip_account_guard and url.startswith(BASE_URL):
             self.ensure_account_allowed(mutating=mutating)
@@ -292,21 +383,52 @@ class VolcAIBotClient:
         elif accept:
             headers["accept"] = accept
 
+        # 请求级日志与进度事件（prompt：长耗时功能记录当前请求与执行耗时）
+        # 日志约定：发起记一条（方法+URL）；返回/超时/异常再记一条
+        # （方法+URL+HTTP码/超时标记+耗时）
+        from . import progress
+        path = urllib.parse.urlsplit(url).path or url
+        label = what or f"{method} {path}"
+        self.logger.info("[请求] 发起 %s %s%s", method, url,
+                         f"（{what}）" if what else "")
+        progress.report_request_start(label, method, path)
+        start = time.perf_counter()
         resp = None
-        for attempt in range(2):
-            s = self._get_http() if attempt == 0 else self._refresh_http()
-            resp = s.request(method, url, params=params, data=body,
-                             files=files, headers=headers, timeout=self.timeout)
-            if resp.status_code in (401, 403) and attempt == 0:
-                self.logger.info("HTTP %s，刷新 Cookie 重试: %s",
-                                 resp.status_code, url)
-                continue
-            break
-        assert resp is not None
-        if resp.status_code != 200:
-            raise ApiError(f"{method} {url} HTTP {resp.status_code}: "
-                           f"{resp.text[:300]}")
-        return resp
+        try:
+            for attempt in range(2):
+                s = self._get_http() if attempt == 0 else self._refresh_http()
+                resp = s.request(method, url, params=params, data=body,
+                                 files=files, headers=headers,
+                                 timeout=self.timeout)
+                if resp.status_code in (401, 403) and attempt == 0:
+                    self.logger.info("HTTP %s，刷新 Cookie 重试: %s",
+                                     resp.status_code, url)
+                    continue
+                break
+            assert resp is not None
+            if resp.status_code != 200:
+                raise ApiError(f"{method} {url} HTTP {resp.status_code}: "
+                               f"{resp.text[:300]}")
+            return resp
+        finally:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            exc = sys.exc_info()[1]
+            if resp is not None:
+                code = str(resp.status_code)
+                size = len(resp.content or b"")
+            elif isinstance(exc, requests.Timeout):
+                code, size = "超时", -1
+            elif exc is not None:
+                code, size = "异常", -1
+            else:
+                code, size = "无响应", -1
+            size_text = f"{size} B" if size >= 0 else "-"
+            self.logger.info(
+                "[请求] 返回 %s %s HTTP %s 耗时 %.0f ms 大小 %s%s",
+                method, url, code, elapsed_ms, size_text,
+                f"（{what}）" if what else "")
+            progress.report_request_done(label, method, path, elapsed_ms,
+                                         status=code, bytes=size)
 
     def _request_json(self, method: str, url: str,
                       params: dict | None = None,
@@ -315,11 +437,12 @@ class VolcAIBotClient:
                       referer: str = "",
                       accept: str | None = None,
                       skip_account_guard: bool = False,
-                      mutating: bool = False) -> dict:
+                      mutating: bool = False,
+                      what: str = "") -> dict:
         resp = self._request_raw(method, url, params=params, payload=payload,
                                  files=files, referer=referer, accept=accept,
                                  skip_account_guard=skip_account_guard,
-                                 mutating=mutating)
+                                 mutating=mutating, what=what)
         try:
             return resp.json()
         except ValueError:
@@ -341,13 +464,18 @@ class VolcAIBotClient:
                       payload: dict | None = None,
                       page: str = PAGE_MULTI_AGENT,
                       with_group: bool = True,
+                      params_extra: dict | None = None,
                       what: str = "接口",
                       mutating: bool = False) -> Any:
         url = self._service_url(coords, suffix)
-        params = {"group_id": coords["group"]} if with_group else None
+        params: dict[str, Any] | None = None
+        if with_group or params_extra:
+            params = {"group_id": coords["group"]} if with_group else {}
+            if params_extra:
+                params.update(params_extra)
         body = self._request_json(method, url, params=params, payload=payload,
                                   referer=self._page_referer(coords, page),
-                                  mutating=mutating)
+                                  mutating=mutating, what=what)
         return unwrap(body, what)
 
     # ---------------------------------------------------------------- 项目组
@@ -362,7 +490,7 @@ class VolcAIBotClient:
         body = self._request_json(
             "GET", f"{BASE_URL}/console/api/v2/casbin/permission/groups",
             params={"resource": PERMISSION_RESOURCE},
-            referer=BOT_MGMT_REFERER)
+            referer=BOT_MGMT_REFERER, what="查询项目组")
         data = unwrap(body, "查询项目组")
         if not isinstance(data, list):
             raise ApiError(f"查询项目组返回结构异常: {str(data)[:200]}")
@@ -398,7 +526,7 @@ class VolcAIBotClient:
             params["ServiceID"] = service_id
         body = self._request_json(
             "GET", f"{BASE_URL}/console/api/v2/llm/agent/list",
-            params=params, referer=BOT_MGMT_REFERER)
+            params=params, referer=BOT_MGMT_REFERER, what="剧本列表查询")
         result = unwrap(body, "剧本列表查询") or {}
         agents = result.get("Agents") or []
         return agents, result.get("Total") or len(agents)
@@ -418,6 +546,22 @@ class VolcAIBotClient:
             collected.extend(agents)
             if len(collected) >= (total or 0):
                 break
+        return collected
+
+    def list_group_all_scripts(self, group_id: int,
+                               page_size: int = 100) -> list[dict]:
+        """按项目组ID收集其下全部剧本（agent/list 翻页，含未发布剧本）。"""
+        collected: list[dict] = []
+        page = 1
+        while True:
+            agents, total = self.list_agents(group_id=group_id, page=page,
+                                             page_size=page_size)
+            if not agents:
+                break
+            collected.extend(agents)
+            if len(collected) >= total:
+                break
+            page += 1
         return collected
 
     def resolve_script(self, script_id: str, refresh: bool = False) -> dict:
@@ -514,7 +658,8 @@ class VolcAIBotClient:
         body = self._request_json(
             "POST", f"{BASE_URL}/console/api/v2/llm/agent/import",
             params={"GroupID": group_id}, files=files,
-            referer=BOT_MGMT_REFERER, accept="application/json")
+            referer=BOT_MGMT_REFERER, accept="application/json",
+            what="导入剧本")
         result = unwrap(body, "导入剧本") or {}
         service_id = result.get("ServiceID")
         service_name = result.get("ServiceName") or path.stem
@@ -581,7 +726,7 @@ class VolcAIBotClient:
             "POST", self._service_url(coords, "training"),
             payload={"description": description},
             referer=self._page_referer(coords, PAGE_MULTI_AGENT),
-            mutating=True)
+            mutating=True, what="发布测试版本")
         unwrap(body, "发布测试版本")
         self.logger.info("已提交发布（剧本 %s 当前版本 V%s，描述: %s），开始轮询...",
                          script_id, current_version, description)
@@ -802,7 +947,8 @@ class VolcAIBotClient:
             body = self._request_json(
                 "POST", self._service_url(coords, "talk"),
                 params={"group_id": coords["group"]}, payload=payload,
-                referer=self._page_referer(coords, PAGE_TEXT_TESTING))
+                referer=self._page_referer(coords, PAGE_TEXT_TESTING),
+                what=f"文本对话第{round_index}轮")
             code = body.get("code")
             if code == 0:
                 break
@@ -883,3 +1029,370 @@ class VolcAIBotClient:
         return self._service_json(
             "POST", coords, "llm/dialog/analysis/dialog_analysis",
             payload=payload, page=PAGE_TEXT_TESTING, what="对话分析") or {}
+
+    # ------------------------------------------------- 剧本基本信息（2026-09-06 抓包）
+
+    def get_script_config(self, script_id: str | None = None,
+                          coords: dict | None = None,
+                          sub_agent_id: str | None = None) -> dict:
+        """GET services/{s}/config[?SubAgentID=]：剧本基础配置。
+
+        返回 Result：DialogControlCfg（MaxDialogueRounds 最大对话轮次 /
+        MaxModelErrorCount 最大模型出错次数 / HangupTextList 挂机关键词）、
+        AsrHotwordID（引用热词表ID，名称需查 list_hotword_tables）、
+        AsrContextCfg.Enabled（ASR 上传上下文开关）、
+        DialogAnalysisCfg（挂载的分析Agent ID）等。
+        带 SubAgentID 时返回该 Sub Agent 的独立配置（Multi Agents 剧本）。
+        """
+        coords = coords or self.resolve_script(script_id or "")
+        params: dict[str, Any] = {}
+        if sub_agent_id:
+            params["SubAgentID"] = sub_agent_id
+        return self._service_json(
+            "GET", coords, "config", payload=None,
+            with_group=False, params_extra=params,
+            what="查询剧本配置") or {}
+
+    def get_prompt_config(self, script_id: str | None = None,
+                          coords: dict | None = None,
+                          sub_agent_id: str | None = None) -> dict:
+        """GET /console/api/v2/llm/prompt_config?ServiceID={s}[&SubAgentID={id}]。
+
+        注意：console 根路径接口（非 services 路径）、无 group_id 参数。
+        返回 Result：AgentMode（1=纯PE型 2=Multi Agents 3=对话流程编排，
+        抓包实证）、ModelType（LLM 模型名）及对应模式的提示词配置
+        （PromptConfig / MultiPromptConfig / PromptOnlyConfig）。
+        带 SubAgentID 返回该 Sub Agent 的 ModelType 与提示词（约 60KB）。
+        """
+        coords = coords or self.resolve_script(script_id or "")
+        params: dict[str, Any] = {"ServiceID": coords["service"]}
+        if sub_agent_id:
+            params["SubAgentID"] = sub_agent_id
+        body = self._request_json(
+            "GET", f"{BASE_URL}/console/api/v2/llm/prompt_config",
+            params=params, referer=self._page_referer(coords, PAGE_MULTI_AGENT),
+            what="查询提示词配置")
+        return unwrap(body, "查询提示词配置") or {}
+
+    def get_sub_agents(self, script_id: str | None = None,
+                       coords: dict | None = None) -> list[dict]:
+        """GET /console/api/v2/llm/multi_agent/sub_agents?ServiceID={s}：
+        Multi Agents 剧本的 Sub Agent 清单（SubAgentID/SubAgentName/AgentMode，
+        返回顺序即页面上从上到下的顺序）。
+        非 Multi Agents 剧本该接口返回空列表或报错，调用方容错处理。
+        """
+        coords = coords or self.resolve_script(script_id or "")
+        body = self._request_json(
+            "GET", f"{BASE_URL}/console/api/v2/llm/multi_agent/sub_agents",
+            params={"ServiceID": coords["service"]},
+            referer=self._page_referer(coords, PAGE_MULTI_AGENT),
+            what="查询Sub Agent列表")
+        result = unwrap(body, "查询Sub Agent列表") or {}
+        return result.get("SubAgents") or []
+
+    def list_hotword_tables(self, script_id: str | None = None,
+                            coords: dict | None = None,
+                            refresh: bool = False) -> list[dict]:
+        """GET /console/api/v2/projects/{p}/bigasr/hotword_tables：
+        项目级热词表清单（id/name，用于 AsrHotwordID -> 名称映射）。
+
+        项目级数据批量查询期间不变，client 级缓存避免逐剧本重复请求。
+        """
+        coords = coords or self.resolve_script(script_id or "")
+        project = coords["project"]
+        with self._resolve_lock:
+            if (self._hotwords_cache is not None
+                    and self._hotwords_cache[0] == project and not refresh):
+                return self._hotwords_cache[1]
+        body = self._request_json(
+            "GET", f"{BASE_URL}/console/api/v2/projects/{project}"
+                   f"/bigasr/hotword_tables",
+            referer=self._page_referer(coords, PAGE_MULTI_AGENT),
+            what="查询热词表列表")
+        result = unwrap(body, "查询热词表列表") or {}
+        tables = result.get("data") or []
+        with self._resolve_lock:
+            self._hotwords_cache = (project, tables)
+        return tables
+
+    def group_name_map(self, refresh: bool = False) -> dict[int, str]:
+        """项目组ID -> 名称映射（casbin 分组接口反查；client 级缓存）。
+
+        批量查询几十个剧本时映射不变，缓存避免每剧本重复请求。
+        """
+        with self._resolve_lock:
+            if self._group_names is not None and not refresh:
+                return self._group_names
+        names = {g.get("id"): g.get("group_name")
+                 for g in self.query_project_groups()}
+        with self._resolve_lock:
+            self._group_names = names
+        return names
+
+    # ------------------------------------------------- 分析Agents（CloudLadder）
+
+    def get_cloud_ladder_token(self, refresh: bool = False) -> str:
+        """GET /console/api/v2/cloud_ladder/token（Cookie 鉴权）-> JWTToken。
+
+        CloudLadder（igh.bytedance.com）接口鉴权头 x-jwt-token 使用。
+        token 与 Cookie 快照绑定缓存：同一登录态不重复获取。
+        """
+        with self._resolve_lock:
+            cached = self._ladder_token
+            snap = self._cookie_snapshot()
+        if cached and cached[0] == snap and not refresh:
+            return cached[1]
+        body = self._request_json(
+            "GET", f"{BASE_URL}/console/api/v2/cloud_ladder/token",
+            referer=f"{BASE_URL}/aibot/agents",
+            what="获取CloudLadder token")
+        token = (unwrap(body, "获取CloudLadder token") or {}).get("JWTToken") or ""
+        if not token:
+            raise ApiError("获取 CloudLadder token 失败：响应无 JWTToken")
+        with self._resolve_lock:
+            self._ladder_token = (snap, token)
+        return token
+
+    def _ladder_get(self, path: str, params: dict | None = None,
+                    referer: str = LADDER_REFERER_AGENTS,
+                    what: str = "CloudLadder接口") -> Any:
+        """CloudLadder GET（x-jwt-token 头鉴权；401 时刷新 token 重试一次）。"""
+        from . import progress
+        url = f"{CLOUD_LADDER_BASE}{path}"
+        self.logger.info("[请求] 发起 GET %s（%s）", url, what)
+        progress.report_request_start(what, "GET", path)
+        start = time.perf_counter()
+        last_err = ""
+        resp = None
+        try:
+            for attempt in range(2):
+                token = self.get_cloud_ladder_token(refresh=attempt > 0)
+                resp = requests.get(
+                    url, params=params, timeout=self.timeout, verify=False,
+                    headers={
+                        "accept": "application/json, text/plain, */*",
+                        "accept-language": "zh-CN,zh;q=0.9",
+                        "user-agent": USER_AGENT,
+                        "referer": referer,
+                        "x-jwt-token": token,
+                        "x-im-internal-access-token": "",
+                    })
+                if resp.status_code == 200:
+                    try:
+                        return unwrap(resp.json(), what)
+                    except ValueError:
+                        raise ApiError(f"{url} 返回非 JSON: {resp.text[:300]}")
+                last_err = (f"GET {path} HTTP {resp.status_code}: "
+                            f"{resp.text[:300]}")
+                if resp.status_code not in (401, 403) or attempt:
+                    raise ApiError(f"{what}失败: {last_err}")
+                self.logger.info("CloudLadder token 失效(HTTP %s)，刷新后重试",
+                                 resp.status_code)
+            raise ApiError(f"{what}失败: {last_err}")
+        finally:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            exc = sys.exc_info()[1]
+            if resp is not None:
+                code = str(resp.status_code)
+                size = len(resp.content or b"")
+            elif isinstance(exc, requests.Timeout):
+                code, size = "超时", -1
+            elif exc is not None:
+                code, size = "异常", -1
+            else:
+                code, size = "无响应", -1
+            size_text = f"{size} B" if size >= 0 else "-"
+            self.logger.info(
+                "[请求] 返回 GET %s HTTP %s 耗时 %.0f ms 大小 %s（%s）",
+                url, code, elapsed_ms, size_text, what)
+            progress.report_request_done(what, "GET", path, elapsed_ms,
+                                         status=code, bytes=size)
+
+    def list_cloud_ladder_agents(
+            self, type_identifiers: list[str] | None = None,
+            agent_ids: list[str] | None = None,
+            max_pages: int = 50) -> tuple[list[dict], int]:
+        """GET /Sca/CloudLadder/Agent/List：分析Agent列表（自动翻页收集全部）。
+
+        - type_identifiers：类型标识过滤（DSA=外呼-通话总结 BDE=外呼-信息抽取
+          BLG=外呼-线索定级；为空查全部）；
+        - agent_ids：按 AgentId 精确查询（如剧本挂载的分析Agent反查）；
+        - 返回 (Agents列表, Total)。Agent 字段：AgentId/Name/Type(中文类型名)/
+          Status(0=未发布 1=已发布)/UpdateTime(ms时间戳)/PublishTime/
+          TypeIdentifier。
+        """
+        collected: list[dict] = []
+        total = 0
+        for page in range(1, max_pages + 1):
+            params: list[tuple[str, Any]] = [
+                ("OrderBy", 4), ("Page", page), ("PageSize", 100),
+                # 与页面请求一致：排除工作流(WF)类，避免“查全部”混入
+                # 非分析Agent（分析Agents 仅 DSA/BDE/BLG 三类）
+                ("ExcludeTypeIdentifiers", "WF")]
+            for t in (type_identifiers or []):
+                params.append(("TypeIdentifiers", t))
+            if agent_ids is not None:
+                for aid in agent_ids:
+                    params.append(("AgentIds", aid))
+            result = self._ladder_get(
+                "/Sca/CloudLadder/Agent/List", params=params,
+                what="查询分析Agent列表") or {}
+            agents = result.get("Agents") or []
+            collected.extend(agents)
+            total = result.get("Total") or 0
+            if not agents or len(collected) >= total:
+                break
+        return collected, total
+
+    @staticmethod
+    def ladder_agent_status(agent: dict) -> str:
+        """分析Agent 状态数值 -> 描述（0=未发布 1=已发布，抓包实证）。"""
+        return "已发布" if agent.get("Status") == 1 else "未发布"
+
+    def get_cloud_ladder_agent_config(self, agent_id: str) -> dict:
+        """GET /Sca/CloudLadder/Agent/Config?AgentId=：分析Agent配置详情。
+
+        返回 Result.AgentConfig：
+        - GeneralAgentConfig.SummaryAgentConfig.InputTmpls：提示词模板列表，
+          Role=1 系统提示词、Role=2 用户提示词（如 "{{.Input}}"）；
+        - ModelParam：模型参数（ModelName/Endpoint/Temperature 等）。
+        """
+        result = self._ladder_get(
+            "/Sca/CloudLadder/Agent/Config", params={"AgentId": agent_id},
+            referer=f"{CLOUD_LADDER_BASE}/ladder/agent/{agent_id}/agent-arrange",
+            what="查询分析Agent配置") or {}
+        return result.get("AgentConfig") or result
+
+    def get_script_analysis_agents(self, script_id: str | None = None,
+                                   coords: dict | None = None,
+                                   config: dict | None = None) -> dict:
+        """取剧本挂载的分析Agent并反查名称/状态/更新时间。
+
+        数据链路：script config -> DialogAnalysisCfg 中的分析Agent ID ->
+        CloudLadder Agent/List?AgentIds= 批量反查。
+        返回 {agent_id: {name,type,status,update_time,publish_time}}；
+        未挂载任何分析Agent时返回 {}。
+
+        键名（2026-09-06 15:45 抓包实证，剧本 llm_tvok_cdjci 挂载 3 类）：
+        - DataExtractAgent   = 信息抽取（BDE...）
+        - LeadsGradingAgent  = 线索定级（BLG...）
+        - DialogSummaryAgent = 通话总结（DSA...）
+        值均为字符串 AgentId。另有兜底：未识别的 *Agent 键按值形态
+        （BDE/BLG/DSA 前缀，兼容 str 与 list）识别，防新增键漏报。
+
+        config：可选传入已取的剧本 config（get_script_info 批量路径复用，
+        省一次重复请求）。
+        """
+        coords = coords or self.resolve_script(script_id or "")
+        if config is None:
+            config = self.get_script_config(coords=coords)
+        da = config.get("DialogAnalysisCfg") or {}
+        ids: list[str] = []
+        for key, value in da.items():
+            if key in LADDER_SCRIPT_AGENT_KEYS:
+                ids.extend(_agent_id_list(value))
+            elif key.endswith("Agent"):
+                # 未识别键：值形态识别兜底（BDE/BLG/DSA 前缀 AgentId）
+                ids.extend(_agent_id_list(value))
+        # 去重（同键重复/兜底与已知键重复）
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            return {}
+        agents, _ = self.list_cloud_ladder_agents(agent_ids=ids)
+        found: dict[str, dict] = {}
+        for a in agents:
+            found[a.get("AgentId") or ""] = {
+                "name": a.get("Name") or "",
+                "type": a.get("Type") or "",
+                "status": self.ladder_agent_status(a),
+                "update_time": a.get("UpdateTime"),
+                "publish_time": a.get("PublishTime"),
+            }
+        # 未反查到的挂载ID也保留（带提示），避免静默丢失
+        for i in ids:
+            if i not in found:
+                found[i] = {"name": "", "type": "", "status": "未知",
+                            "update_time": None, "publish_time": None,
+                            "note": "CloudLadder未查到该Agent"}
+        return found
+
+    def get_script_info(self, script_id: str,
+                        coords: dict | None = None,
+                        agent: dict | None = None) -> dict:
+        """汇总剧本基本信息（prompt 输出字段全量）。
+
+        组合：agent/list（版本/状态）+ config（基础配置/ASR/分析Agent挂载）
+        + prompt_config（LLM模型）+ hotword_tables（热词表名称）
+        + release-launch（测试/线上版本发布详情）+ CloudLadder（分析Agent
+        名称/状态/更新时间）。
+
+        agent：可选传入 agent/list 的清单项（批量查询翻页收集时已含
+        AgentName/版本等字段），可省一次 query_script 请求；coords 需
+        一并提供（由清单项 ProjectID/ServiceID/GroupID 组装）。
+        """
+        if agent is not None and coords is not None:
+            pass   # 复用调用方数据（批量路径：省 query_script）
+        else:
+            coords = coords or self.resolve_script(script_id)
+            agent = self.query_script(script_id)
+        config = self.get_script_config(coords=coords)
+        prompt_cfg = self.get_prompt_config(coords=coords)
+        groups = self.group_name_map()
+
+        dc = config.get("DialogControlCfg") or {}
+        hotword_id = config.get("AsrHotwordID")
+        asr_ctx = (config.get("AsrContextCfg") or {}).get("Enabled")
+        hotword_name = ""
+        if hotword_id:
+            for t in self.list_hotword_tables(coords=coords):
+                if t.get("id") == hotword_id:
+                    hotword_name = t.get("name") or ""
+                    break
+        analysis = self.get_script_analysis_agents(coords=coords,
+                                                   config=config)
+        launch = self.get_release_launch(coords=coords)
+        ti = launch.get("train_info") or {}
+        oi = launch.get("online_info") or {}
+
+        # 分析Agent按中文类型名归类（类型名来自 CloudLadder 响应，不硬编码剧本侧键名）
+        by_type: dict[str, dict] = {}
+        for aid, info in analysis.items():
+            t = info.get("type")
+            if t:
+                by_type[t] = dict(info, id=aid)
+        agent_mode = prompt_cfg.get("AgentMode")
+        # 非真人接听识别（prompt 2026-09-06：config 的 AnswerRecognizeCfg；
+        # 抓包+在线实证三种类型均返回，全部输出——页面 UI 仅在对话流程编排
+        # 提供编辑入口）
+        ar = config.get("AnswerRecognizeCfg") or {}
+        answer_recognize_enabled = bool(ar.get("IsEnabled"))
+        answer_recognize_text = str(ar.get("HangupText") or "")
+
+        return {
+            "project_group": groups.get(coords.get("group"), ""),
+            "script_id": script_id,
+            "script_name": agent.get("AgentName") or coords.get("agent_name"),
+            "agent_mode": agent_mode,
+            "agent_mode_name": agent_mode_name(agent_mode),
+            "max_dialogue_rounds": dc.get("MaxDialogueRounds"),
+            "max_model_error_count": dc.get("MaxModelErrorCount"),
+            "hangup_keywords": dc.get("HangupTextList") or [],
+            "llm_model": prompt_cfg.get("ModelType") or "",
+            "asr_hotword_table": hotword_name or
+                (f"(ID:{hotword_id})" if hotword_id else ""),
+            "asr_context_enabled": "开启" if asr_ctx else "未开启",
+            "answer_recognize_enabled":
+                "开启" if answer_recognize_enabled else "未开启",
+            "answer_recognize_text": answer_recognize_text,
+            "analysis_agents": {t: info for t, info in by_type.items()},
+            "preview_publish": {
+                "version": ti.get("version"),
+                "update_time": ti.get("update_time"),
+                "status": ti.get("status"),
+            },
+            "online_publish": {
+                "version": oi.get("version"),
+                "update_time": oi.get("update_time"),
+                "status": oi.get("status"),
+            },
+        }

@@ -10,7 +10,7 @@
 用法：
     python scripts/import_script.py "result/xxx_导出剧本/【存客】multi-agent v2.json" "电销项目组_测试"
 
-结果文件：result/{时间_导入剧本}/import.json
+结果文件：result/{时间_账号_导入剧本}/import.json
 提示：新导入剧本未发布（版本 0），文本对话测试前需先发布测试版本
       （运行 scripts/publish_preview.py）。
 """
