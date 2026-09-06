@@ -918,6 +918,173 @@ class VolcAIBotClient:
         return {"before": before, "after": after,
                 "values": norm, "verify_failed": verify_failed}
 
+    # ---------------------------------------------------------------- 查询通话明细
+
+    def query_call_records(
+            self, group_name: str, script_id: str,
+            date_start: str, date_end: str,
+            grading: str | None = None,
+            duration_op: str | None = None,
+            duration_value: int | None = None,
+            duration_min: int | None = None,
+            duration_max: int | None = None,
+            answer_recognize: str | None = None,
+            page_size: int = 100,
+            max_pages: int = 200,
+            page_index: int | None = None) -> dict:
+        """查询通话明细（POST /console/api/v2/llm/call_list?group_id={g}）。
+
+        必填：group_name（项目组名）、script_id（剧本ID）、
+        date_start/date_end（"YYYY-MM-DD HH:MM:SS" 或 "YYYY-MM-DD"）。
+        可选过滤（prompt 约定，2026-09-06 22:51 抓包实证）：
+        - grading：意向等级（非固定值，如 A/B/高意愿，原样传
+          RobotGrading）；
+        - duration_op：通话时长判断方式 "大于等于"/"小于"/"介于"；
+          对应 DurationStart/DurationEnd（毫秒）：
+          大于等于 -> Start=value；小于 -> End=value（Start=0）；
+          介于 -> Start=min, End=max；
+        - answer_recognize：命中语音助手 "是"/"否"/"未启用识别能力"；
+          是->AnswerRecognizeType=1，否->2，未启用->0
+          （实测：=0 精确匹配未启用识别的记录；不传该键=不过滤）；
+        - 单位换算：输入的秒统一乘 1000 传服务端。
+
+        分页（prompt 2026-09-06：分页查询只需要查询第一页）：
+        - page_index=None（默认）：自动翻页收集全部（至 max_pages，
+          **受服务端 10000 条翻页上限约束**：PageStartIndex≥约 10000 时
+          服务端报 Code=101"翻页不支持超过10000条，请通过导出查看"；
+          实测上限≈已收集 9990 条（psi=490×20 OK，500 报错），触达时
+          停止翻页并带 truncated 标记，结果仍可用）；
+        - page_index>=0：**单页模式**——只取第 page_index 页（0 基），
+          不自动翻满；返回带 page_index/total_pages 供翻页。
+
+        返回 {total, records: [{被叫号码/主叫号码/接通状态/SIP状态码/
+        通话时长秒/交互轮次/环境类型/命中语音助手/意向等级/信息抽取/
+        短信状态/创建时间/通话ID...}], page_index?, total_pages?}
+        （page_size 建议 20~100，抓包页面用 20）。
+        """
+        group = self.find_group(group_name)
+        gid = group["id"]
+        # 时长过滤 -> DurationStart/DurationEnd（毫秒）
+        ds = de = None
+        if duration_op == "大于等于":
+            ds = int(duration_value or 0) * 1000
+        elif duration_op == "小于":
+            de = int(duration_value or 0) * 1000
+            ds = 0
+        elif duration_op == "介于":
+            ds = int(duration_min or 0) * 1000
+            de = int(duration_max or 0) * 1000
+        # 命中语音助手 -> AnswerRecognizeType（prompt 2026-09-07：
+        # 0=未启用识别能力，实测=0 精确过滤未启用识别的剧本记录；
+        # 不传该键=不过滤（与 0 语义不同，勿混用））
+        art: int | None = None
+        if answer_recognize == "是":
+            art = 1
+        elif answer_recognize == "否":
+            art = 2
+        elif answer_recognize == "未启用识别能力":
+            art = 0
+        # 其他值/不传 -> 不过滤
+
+        records: list[dict] = []
+        total = 0
+        truncated = False
+        for page in range(max_pages):
+            payload: dict[str, Any] = {
+                "DateStart": date_start,
+                "DateEnd": date_end,
+                "PageSize": page_size,
+                "PageStartIndex": len(records),
+                "Schema": script_id,
+            }
+            if grading:
+                payload["RobotGrading"] = grading
+            if ds is not None:
+                payload["DurationStart"] = ds
+            if de is not None:
+                payload["DurationEnd"] = de
+            if art is not None:
+                payload["AnswerRecognizeType"] = art
+            # 单页模式（page_index 非 None）：偏移=页号*页大小
+            if page_index is not None:
+                payload["PageStartIndex"] = int(page_index) * page_size
+            try:
+                body = self._request_json(
+                    "POST", f"{BASE_URL}/console/api/v2/llm/call_list",
+                    params={"group_id": gid}, payload=payload,
+                    referer=(f"{BASE_URL}/aibot/call-detail-llm"
+                             f"?groupId={gid}&scriptName={script_id}"),
+                    what="查询通话明细")
+                result = unwrap(body, "查询通话明细") or {}
+            except ApiError as e:
+                # 服务端翻页上限（Code=101"翻页不支持超过10000条，
+                # 请通过导出查看"；实测 psi=500×20 报错、490 OK——错误在
+                # 响应 body 的 ResponseMetadata.Error，unwrap 时抛出）：
+                # 全收集模式下已收集的部分仍有效——标记截断后返回，
+                # 不让整个查询失败（另一 AI 见到的"数据异常"即此场景）
+                if "10000" in str(e) or "超过10000" in str(e):
+                    if records:
+                        truncated = True
+                        break
+                raise
+            data = result.get("Data") or []
+            records.extend(self._call_record_row(c) for c in data)
+            total = result.get("Count") or 0
+            # 单页模式：取一页即返回（附页信息供翻页）
+            if page_index is not None:
+                import math
+                return {
+                    "total": total,
+                    "count": len(records),
+                    "records": records,
+                    "page_index": int(page_index),
+                    "total_pages": (math.ceil(total / page_size)
+                                    if page_size else 0),
+                    "page_size": page_size,
+                    "mode": "单页（page_index 指定；不传=自动收集全部）",
+                }
+            if not data or len(records) >= total:
+                break
+        out = {"total": total, "count": len(records), "records": records}
+        if truncated:
+            out["truncated"] = True
+            out["note"] = (f"服务端翻页上限（Code=101，PageStartIndex "
+                           f"约 {len(records)} 条处触达），"
+                           f"已收集 {len(records)}/{total} 条；"
+                           f"如需全部请缩小时间范围或分时间段查询")
+        return out
+
+    @staticmethod
+    def _call_record_row(c: dict) -> dict:
+        """call_list 响应条目 -> prompt 输出字段（13 项）。
+
+        命中语音助手三态（prompt 2026-09-07：IsNonhumanAnswer）：
+        true -> 是；false -> 否；键缺失/None（空）-> 未启用识别能力
+        （抓包实证：llm_lxnt_bjffj 未启用识别，记录整个键缺失）。
+        """
+        grading = c.get("GradingInfo") or {}
+        sms = c.get("SmsInfo") or {}
+        v = c.get("IsNonhumanAnswer")
+        if v is None:
+            nonhuman = "未启用识别能力"
+        else:
+            nonhuman = "是" if v else "否"
+        return {
+            "被叫号码": c.get("PhoneNumber") or "",
+            "主叫号码": c.get("ani") or "",
+            "接通状态": "已接通" if c.get("IsConnected") else "未接通",
+            "SIP状态码": c.get("SIPCode") or "",
+            "通话时长/秒": round((c.get("Duration") or 0) / 1000, 1),
+            "交互轮次": c.get("Rounds"),
+            "环境类型": c.get("Env") or "",
+            "命中语音助手": nonhuman,
+            "意向等级": grading.get("RobotGrading") or "",
+            "信息抽取": c.get("InfoExtraction") or "",
+            "短信状态": sms.get("Status") or "",
+            "创建时间": c.get("CreateDate") or "",
+            "通话ID": c.get("CallID") or "",
+        }
+
     # ---------------------------------------------------------------- 文本对话测试
 
     def talk(self, coords: dict, context_str: str, query: str,

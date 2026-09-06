@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """火山引擎智能外呼 MCP 服务（SSE，默认端口 19000，支持配置）。
 
-把 17 个独立脚本功能全部封装为 MCP 工具（共 26 个），供 AI 调用：
+把 17 个独立脚本功能全部封装为 MCP 工具（共 27 个），供 AI 调用：
 - 使用说明：usage_guide（运行前提、各工具用法、典型调用序列）
 - 账号：get_current_user（获取当前登录账号；所有工具内置账号守卫）
 - 项目组/剧本：query_project_groups、list_group_scripts、query_script、
@@ -17,6 +17,7 @@
   query_analysis_agents、get_analysis_agent
 - 批量导出与内容搜索（2026-09-06 新增）：
   batch_export_scripts、search_exported_scripts
+- 查询通话明细（2026-09-06 新增）：query_call_records
 
 兼容 mcp SDK 1.x（FastMCP）与 2.x（MCPServer）两个大版本。
 
@@ -324,6 +325,14 @@ publish_preview(script_id, description?)
 - batch_export_scripts(group_names?)：按项目组（多个或全部）批量导出
   剧本，目录名含当前火山账号（区分环境）且以「_批量导出剧本」结尾，
   内含 清单.json（项目组/剧本ID/剧本名称，亦记录账号）；
+- query_call_records(group_name, script_id, date_start, date_end,
+  grading?/duration_op?/duration_value?或duration_min/max?/answer_recognize?,
+  page_index?, page_size=100)：查询通话明细（被叫/主叫号码、接通状态、
+  SIP码、时长秒、轮次、环境、命中语音助手、意向等级、信息抽取、
+  短信状态、创建时间、通话ID）。默认自动翻页收集全部；
+  **传 page_index（0 基）为单页模式**——只想确认有没有记录/看最近
+  几条时传 0（只查第一页），返回带 total_pages 供继续翻页。
+  结果落盘 result 目录。
 - search_exported_scripts(export_dir?, keyword, with_count?)：在导出
   目录中按行搜索关键字，返回 项目组/剧本ID/剧本名称/是否出现/出现次数
   （with_count=false 时次数为空）。export_dir 省略时取最新导出目录。
@@ -1218,6 +1227,92 @@ def _batch_export_impl(group_names, c) -> dict:
     return {"export_dir": str(out_dir), "account": str(account),
             "total": len(manifest), "exported": exported,
             "failed": failed, "scripts": manifest}
+
+
+@mcp.tool()
+@tool_with_detail
+def query_call_records(group_name: str, script_id: str,
+                       date_start: str, date_end: str,
+                       grading: str | None = None,
+                       duration_op: str | None = None,
+                       duration_value: int | None = None,
+                       duration_min: int | None = None,
+                       duration_max: int | None = None,
+                       answer_recognize: str | None = None,
+                       page_index: int | None = None,
+                       page_size: int = 100) -> dict:
+    """查询通话明细（外呼通话记录，POST llm/call_list）。
+
+    参数：
+    - group_name / script_id / date_start / date_end：必填（项目组名、
+      剧本ID、起止时间 "YYYY-MM-DD HH:MM:SS"）；
+    - grading：可选，意向等级过滤（非固定值，如 A/B/高意愿）；
+    - duration_op：可选，"大于等于"/"小于"/"介于"，配 duration_value
+      或 duration_min/max（单位秒）；
+    - answer_recognize：可选，"是"/"否"/"未启用识别能力"（命中语音助手
+      过滤，对应 AnswerRecognizeType 1/2/0）；
+    - page_index：可选分页页号（**0 基**；不传=自动翻页收集全部；
+      传 0=只查第一页，返回带 total_pages 供翻页——只想确认有没有
+      记录/看最近几条时传 0 即可）；
+    - page_size：分页大小（默认 100）。
+    返回 {total, records: [{被叫号码/主叫号码/接通状态/SIP状态码/
+    通话时长秒/交互轮次/环境类型/命中语音助手/意向等级/信息抽取/
+    短信状态/创建时间/通话ID}]}（单页模式另带 page_index/total_pages）。
+    结果落盘 result/{时间_账号_查询通话明细}/records.json + md。
+    """
+    client = _get_client()
+    r = client.query_call_records(
+        group_name=group_name, script_id=script_id,
+        date_start=date_start, date_end=date_end,
+        grading=grading, duration_op=duration_op,
+        duration_value=duration_value, duration_min=duration_min,
+        duration_max=duration_max, answer_recognize=answer_recognize,
+        page_size=page_size, page_index=page_index)
+    out_dir = new_result_dir("查询通话明细")
+    # 请求参数全量记录（prompt 2026-09-07：有指定的请求参数都要记录；
+    # 未指定的可选项标注"未指定"）
+    def _v(x):
+        return "未指定" if x is None else x
+
+    params = {
+        "项目组": group_name,
+        "剧本": script_id,
+        "开始时间": date_start,
+        "结束时间": date_end,
+        "意向等级": _v(grading),
+        "通话时长-判断方式": _v(duration_op),
+        "通话时长-数值": _v(duration_value),
+        "通话时长-数值-最小": _v(duration_min),
+        "通话时长-数值-最大": _v(duration_max),
+        "命中语音助手": _v(answer_recognize),
+        "分页-页号": ("全部收集" if page_index is None
+                      else f"第 {page_index} 页（0 基）"),
+        "分页-页大小": page_size,
+    }
+    r = dict(r, request_params=params)
+    write_json(out_dir / "records.json", r)
+    md = ["# 查询通话明细 " + script_id, "", "## 请求参数", ""]
+    md += [f"- {k}：{v}" for k, v in params.items()]
+    md += ["", f"- 总数：{r['total']}", f"- 本次收集：{r['count']} 条",
+           "", "## 通话记录", "",
+           "\t".join(["被叫号码", "主叫号码", "接通状态", "SIP状态码",
+                      "通话时长/秒", "交互轮次", "环境类型", "命中语音助手",
+                      "意向等级", "信息抽取", "短信状态", "创建时间",
+                      "通话ID"])]
+    for rec in r["records"]:
+        md.append("\t".join(
+            " ".join(str(rec.get(c, "") or "").split()) for c in
+            ["被叫号码", "主叫号码", "接通状态", "SIP状态码", "通话时长/秒",
+             "交互轮次", "环境类型", "命中语音助手", "意向等级", "信息抽取",
+             "短信状态", "创建时间", "通话ID"]))
+    (out_dir / "records.md").write_text(
+        "\n".join(md) + "\n", encoding="utf-8")
+    return {"total": r["total"], "count": r["count"],
+            "records": r["records"],
+            "request_params": params,
+            "result_file": str(out_dir / "records.md"),
+            "note": "记录已全量落盘（含请求参数），records 数组同内容；"
+                    "大数据量时按需读取文件"}
 
 
 @mcp.tool()

@@ -2,7 +2,7 @@
 
 把火山引擎智能外呼控制台（console.volcengine.com/aibot）的网页功能转换为 Python 脚本与 MCP 服务，供 AI 通过自然语言完成剧本的查询、修改、导入、发布与对话测试闭环。
 
-**17 个功能脚本 + Web 快捷工具**：获取当前登录账号、查询项目组、查询项目组下的剧本、按剧本ID查询、按名称搜索、导出剧本、导入剧本、发布测试版本、查询剧本变量、变量增删改、测试版本变量赋值、文本对话测试、查询剧本基本信息（含 Sub Agent）、查询分析Agent、获取分析Agent内容、批量导出剧本、搜索已导出剧本内容关键字；Web 快捷工具：批量查询剧本信息、批量搜索剧本内容、批量下载搜索分析Agent。
+**17 个功能脚本 + Web 快捷工具**：获取当前登录账号、查询项目组、查询项目组下的剧本、按剧本ID查询、按名称搜索、导出剧本、导入剧本、发布测试版本、查询剧本变量、变量增删改、测试版本变量赋值、文本对话测试、查询剧本基本信息（含 Sub Agent）、查询分析Agent、获取分析Agent内容、批量导出剧本、搜索已导出剧本内容关键字、查询通话明细；Web 快捷工具：批量查询剧本信息、批量搜索剧本内容、批量下载搜索分析Agent。
 
 ## 目录结构
 
@@ -17,7 +17,7 @@ volcengine_aibot_scripts/
 │  ├─ config.py                 # 常量（基址/产品线/变量类型表）
 │  ├─ logging_util.py           # 日志（log/ 每天一个文件）
 │  └─ result.py                 # 结果目录（result/{时间_账号_功能}/）
-├─ scripts/                     # 17 个独立可执行脚本（一功能一脚本）
+├─ scripts/                     # 18 个独立可执行脚本（一功能一脚本）
 │  ├─ get_current_user.py       # 获取当前登录的账号（--save-allowed 写配置）
 │  ├─ query_project_groups.py   # 查询项目组
 │  ├─ list_group_scripts.py     # 查询项目组下的剧本
@@ -34,7 +34,8 @@ volcengine_aibot_scripts/
 │  ├─ query_analysis_agents.py  # 查询分析Agent列表（CloudLadder 域）
 │  ├─ get_analysis_agent.py     # 获取分析Agent内容（提示词/状态/模型）
 │  ├─ batch_export_scripts.py   # 批量导出剧本（按项目组/全部）
-│  └─ search_exported_scripts.py # 搜索已导出剧本内容关键字
+│  ├─ search_exported_scripts.py # 搜索已导出剧本内容关键字
+│  └─ query_call_records.py      # 查询通话明细（过滤/翻页）
 ├─ mcp_server.py                # 服务入口（同端口：Web 配置页 + MCP SSE；托盘）
 ├─ md/                          # 文档（Web 页面内容：使用说明/适用场景/提示词示例；非技术人员AI协助部署指南）
 ├─ install.bat                  # 安装依赖（虚拟环境 .venv）
@@ -95,7 +96,7 @@ start.bat 19001                        # 本次覆盖端口
 claude mcp add --scope user --transport sse volc-aibot http://127.0.0.1:19000/sse
 ```
 
-MCP 服务共 26 个工具（含 `get_current_user` 账号工具与 `usage_guide` 使用说明工具——返回运行前提、各工具用法与典型调用序列，AI 不确定怎么用时先调它）。
+MCP 服务共 27 个工具（含 `get_current_user` 账号工具与 `usage_guide` 使用说明工具——返回运行前提、各工具用法与典型调用序列，AI 不确定怎么用时先调它）。
 
 新增的剧本信息与分析 Agents 工具：`query_script_info`（剧本基本信息：类型/最大轮次/模型/ASR/分析Agents挂载/发布状态）、`get_sub_agents` / `get_sub_agent_info`（Multi Agents 剧本的 Sub Agent 清单与配置）、`query_analysis_agents` / `get_analysis_agent`（分析Agent 列表与内容：系统/用户提示词、发布状态）、`batch_export_scripts`（批量导出）与 `search_exported_scripts`（导出内容关键字搜索）。
 
