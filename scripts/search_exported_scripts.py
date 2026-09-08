@@ -14,7 +14,7 @@
     python scripts/search_exported_scripts.py --list          # 列出可选目录
     python scripts/search_exported_scripts.py --dir ... --keyword 优惠券 --count
 
-结果文件：result/{时间_账号_搜索已导出剧本内容关键字}/结果.json + 结果.md
+结果文件：result/{日期}/{时间_账号_搜索已导出剧本内容关键字}/结果.json + 结果.md
 （搜索本身不依赖网络/Cookie；账号为 best-effort 获取——Cookie 服务可用时
 写入目录名，不可用时目录名退化为 {时间_功能描述}；--dir 可只给目录名，
 自动在 result/ 下定位）
@@ -36,24 +36,49 @@ from volc_aibot.result import (EXPORT_DIR_SUFFIX,      # noqa: E402
 
 
 def find_export_dirs(result_root: Path) -> list[Path]:
-    """列出 result/ 下以 _批量导出剧本 结尾的目录（按时间倒序）。"""
+    """列出 result/（含日期子层）下以 _批量导出剧本 结尾的目录（时间倒序）。
+
+    目录结构（prompt 2026-09-07）：result/{日期}/{时间_账号_批量导出剧本}/，
+    兼容旧的 result/ 一级结构。
+    """
     if not result_root.is_dir():
         return []
-    dirs = [d for d in result_root.iterdir()
-            if d.is_dir() and d.name.endswith(EXPORT_DIR_SUFFIX)]
+    dirs = []
+    for d in result_root.iterdir():
+        if not d.is_dir():
+            continue
+        if d.name.endswith(EXPORT_DIR_SUFFIX):
+            dirs.append(d)
+        elif d.name.isdigit():        # 日期层（YYYYMMDD）
+            dirs.extend(x for x in d.iterdir()
+                        if x.is_dir()
+                        and x.name.endswith(EXPORT_DIR_SUFFIX))
     return sorted(dirs, reverse=True)
 
 
 def resolve_target_dir(arg: str | None, result_root: Path) -> Path | None:
-    """--dir 支持完整路径或目录名；None 时取最新一个导出目录。"""
+    """--dir 支持完整路径或目录名（兼容 日期层/目录名）；None 取最新。"""
     if arg:
         p = Path(arg)
         if not p.is_absolute():
-            cand = result_root / arg
-            p = cand if cand.exists() else p
+            # 依次尝试：result/{arg}（旧结构/目录名）、result/日期/{arg}
+            for cand in (result_root / arg,
+                         *[result_root / day / arg
+                           for day in _day_dirs(result_root)]):
+                if cand.is_dir():
+                    p = cand
+                    break
         return p if p.is_dir() else None
     dirs = find_export_dirs(result_root)
     return dirs[0] if dirs else None
+
+
+def _day_dirs(result_root: Path) -> list[str]:
+    """result/ 下的日期目录名（倒序）。"""
+    if not result_root.is_dir():
+        return []
+    return sorted((d.name for d in result_root.iterdir()
+                   if d.is_dir() and d.name.isdigit()), reverse=True)
 
 
 def load_manifest(export_dir: Path) -> dict[str, dict]:

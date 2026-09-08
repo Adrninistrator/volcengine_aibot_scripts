@@ -9,7 +9,7 @@
     python scripts/list_group_scripts.py 脚本测试项目组
     python scripts/list_group_scripts.py "电销项目组_测试"
 
-结果文件：result/{时间_账号_查询项目组下的剧本}/scripts.json
+结果文件：result/{日期}/{时间_账号_查询项目组下的剧本}/scripts.json
 """
 
 from __future__ import annotations

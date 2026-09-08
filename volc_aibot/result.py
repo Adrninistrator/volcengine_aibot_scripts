@@ -102,16 +102,52 @@ def _resolve_account() -> str:
 
 
 def new_result_dir(desc: str) -> Path:
-    """创建并返回 result/{YYYYMMDD_HHMMSS}_{账号}_{功能描述}/ 子目录。
+    """创建并返回 result/{当天日期}/{时间_账号_功能描述}/ 子目录。
 
-    账号获取不到（离线/失败）时退化为 {YYYYMMDD_HHMMSS}_{功能描述}。
+    （prompt 2026-09-07：目录结构改为按当天日期分组）
+    账号获取不到（离线/失败）时退化为 {时间}_{功能描述}。
     """
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    now = datetime.now()
+    day = now.strftime("%Y%m%d")
+    ts = now.strftime("%Y%m%d_%H%M%S")
     account = _resolve_account()
-    d = RESULT_DIR / f"{ts}_{account}_{_safe_name(desc)}" if account else \
-        RESULT_DIR / f"{ts}_{_safe_name(desc)}"
+    name = f"{ts}_{account}_{_safe_name(desc)}" if account else \
+        f"{ts}_{_safe_name(desc)}"
+    d = RESULT_DIR / day / name
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def find_result_dir(name: str) -> Path | None:
+    """按目录名解析结果子目录（兼容新旧两种结构），不存在返回 None。
+
+    - 新结构（2026-09-07 起）：result/{yyyyMMdd}/{目录名}；
+    - 旧结构：result/{目录名}（2026-09-07 前的目录，如历史批量导出）。
+
+    Web 快捷工具的搜索（批量搜索剧本内容/批量下载分析Agent 的第 2 步）
+    由目录下拉传目录名进来——列表接口（export_dirs/agents_dirs）两种
+    结构都会列出，解析必须同样兼容，否则新导出的目录“看得见却搜不了”
+    （2026-09-08 修复：此前直接 RESULT_DIR/name，只命中旧结构）。
+    多个日期下同名目录时取最新（按日期目录倒序的第一个命中）。
+    """
+    name = str(name or "").strip()
+    if not name:
+        return None
+    # 防目录穿越：仅接受目录名（不含路径分隔符）
+    if "/" in name or "\\" in name or ".." in name:
+        return None
+    legacy = RESULT_DIR / name
+    if legacy.is_dir():
+        return legacy
+    try:
+        days = [d for d in RESULT_DIR.iterdir() if d.name.isdigit()]
+    except OSError:
+        return None
+    for d in sorted(days, reverse=True):
+        cand = d / name
+        if cand.is_dir():
+            return cand
+    return None
 
 
 def write_json(path: Path, obj: Any) -> Path:

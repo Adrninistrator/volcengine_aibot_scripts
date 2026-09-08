@@ -31,40 +31,33 @@ AI 会按本文档中的「AI 执行清单」逐步操作（每条命令执行�
 
 **Chrome 浏览器**：需要已安装（绝大多数电脑已具备），并在其中安装 chrome_capture_operate 的浏览器插件。
 
-# 下载地址与国内镜像（已实测验证）
+# 下载地址与国内镜像
 
-以下链接与速度在 2025-09 实测验证。**优先用国内地址**，官方境外地址仅在对应国内地址不可用时使用。
+**优先用国内地址**（国内网络下速度快），官方境外地址仅在对应国内地址不可用时使用。
 
 ## Python 安装包（约 26MB）
 
-| 来源 | 地址 | 实测结果 |
-|---|---|---|
-| 华为云镜像（推荐，国内快） | `https://mirrors.huaweicloud.com/python/3.12.6/python-3.12.6-amd64.exe` | **约 16 秒下载完成**，文件 26527368 字节，与官方一致 |
-| python.org 官方 | `https://www.python.org/ftp/python/3.12.6/python-3.12.6-amd64.exe` | 文件大小一致，国内网络下载超时（2 分钟未完成） |
+| 来源 | 地址 |
+|---|---|
+| 华为云镜像（推荐，国内快） | `https://mirrors.huaweicloud.com/python/3.12.6/python-3.12.6-amd64.exe` |
+| python.org 官方 | `https://www.python.org/ftp/python/3.12.6/python-3.12.6-amd64.exe` |
 
 > 华为云镜像目录 `https://mirrors.huaweicloud.com/python/` 同步了 Python 官网的全部版本，其他版本（如 3.11.x）把地址中的版本号替换即可。
 
 ## 两个项目代码 ZIP
 
-| 来源 | 地址 | 实测结果 |
-|---|---|---|
-| Gitee（推荐，国内快） | `https://gitee.com/adrninistrator/volcengine_aibot_scripts/repository/archive/master.zip` | 约 3 秒，100KB |
-| Gitee（推荐，国内快） | `https://gitee.com/adrninistrator/chrome_capture_operate/repository/archive/master.zip` | 约 3 秒，1.2MB |
-| GitHub 备选 | `https://github.com/Adrninistrator/volcengine_aibot_scripts/archive/refs/heads/master.zip` | 约 3 秒，与 Gitee 内容一致 |
-| GitHub 备选 | `https://github.com/Adrninistrator/chrome_capture_operate/archive/refs/heads/master.zip` | 约 3 秒，与 Gitee 内容一致 |
+| 来源 | 地址 |
+|---|---|
+| Gitee（推荐，国内快） | `https://gitee.com/adrninistrator/volcengine_aibot_scripts/repository/archive/master.zip` |
+| Gitee（推荐，国内快） | `https://gitee.com/adrninistrator/chrome_capture_operate/repository/archive/master.zip` |
+| GitHub 备选 | `https://github.com/Adrninistrator/volcengine_aibot_scripts/archive/refs/heads/master.zip` |
+| GitHub 备选 | `https://github.com/Adrninistrator/chrome_capture_operate/archive/refs/heads/master.zip` |
 
-四个 ZIP 均校验完整可解压，解压后的根目录名为 `volcengine_aibot_scripts-master` 与 `chrome_capture_operate-master`。
+解压后的根目录名分别为 `volcengine_aibot_scripts-master` 与 `chrome_capture_operate-master`。
 
 ## Python 依赖包（pip 安装来源）
 
-pip 默认从官方 PyPI 下载依赖。国内网络下建议改用国内镜像（阿里云）：
-
-| 来源 | 地址 | 实测结果（下载全部依赖） |
-|---|---|---|
-| 阿里云镜像（推荐） | `https://mirrors.aliyun.com/pypi/simple/` | **约 13 秒（33 个包）**；chrome_capture_operate 依赖约 62 秒（21 个包） |
-| 官方 PyPI | 默认 | 可用但慢：约 2 分钟（33 个包） |
-
-用法：在安装命令中加 `-i https://mirrors.aliyun.com/pypi/simple/`（详见「AI 执行清单」第 4 步）。
+pip 默认从官方 PyPI 下载依赖。国内网络下建议改用国内镜像（阿里云）：在安装命令中加 `-i https://mirrors.aliyun.com/pypi/simple/`（详见「AI 执行清单」第 4 步）。
 
 # 前提条件
 
@@ -72,7 +65,7 @@ pip 默认从官方 PyPI 下载依赖。国内网络下建议改用国内镜像�
 |---|---|
 | Windows 操作系统 | 必须。本工具及 chrome_capture_operate 仅支持 Windows，Mac 无法使用 |
 | 已安装 AI 命令行工具（如 Claude Code） | 必须。本文档的「AI 执行清单」依赖 AI 能在电脑上执行命令 |
-| 网络可访问 gitee.com 或 github.com | 必须。下载代码；Python 安装包默认从 python.org 下载，慢时用国内镜像（见下文） |
+| 网络可访问 gitee.com 或 github.com | 必须。下载代码；Python 安装包优先用国内镜像下载（见下文） |
 | 拥有火山引擎智能外呼控制台账号 | 必须。需人工登录一次 |
 | 电脑管理员权限 | **不需要**。Python 可按用户级安装，全部软件仅安装到用户目录 |
 
@@ -110,7 +103,7 @@ python --version
 
 ## 第 2 步：安装 Python（已装则跳过）
 
-下载官方安装包（约 26MB，优先国内镜像；两种来源实测结果见「下载地址与国内镜像」）：
+下载安装包（约 26MB，优先国内镜像）：
 
 ```
 curl -L -o python-3.12.6-amd64.exe https://mirrors.huaweicloud.com/python/3.12.6/python-3.12.6-amd64.exe
@@ -136,18 +129,35 @@ python-3.12.6-amd64.exe /passive InstallAllUsers=0 PrependPath=1
 
 应输出 `Python 3.12.6`。
 
-> 注意：安装后 PATH 变化只对**新打开的终端**生效，AI 当前终端可能仍找不到 `python` 命令。后续命令请直接使用完整路径 `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`，避免此问题。
+**安装后检查 PATH（重要）**：AI 需检查 Python 安装目录是否已写入用户环境变量 PATH；若未写入（例如安装时未带 `PrependPath=1`，或之前有人装过但没勾选 Add to PATH），需补写入，否则后续新终端无法直接用 `python` 命令：
+
+检查（新开终端执行，输出含 Python312 路径即已写入）：
+
+```
+where python
+```
+
+未写入时补写入（PowerShell，用户级，无需管理员；只修改用户 PATH，并把 Python 目录前插到最前面）：
+
+```powershell
+$p = [Environment]::GetEnvironmentVariable('Path','User')
+if ($p -notlike '*Python312*') {
+    [Environment]::SetEnvironmentVariable('Path',"$env:LOCALAPPDATA\Programs\Python\Python312;$env:LOCALAPPDATA\Programs\Python\Python312\Scripts;$p",'User')
+}
+```
+
+> 不要用 `setx PATH "%PATH%;..."` 补写：会把系统 PATH 一并复制进用户 PATH，且 `setx` 有 1024 字符截断风险。写入 PATH 后只对**新打开的终端**生效，AI 当前终端请直接使用完整路径 `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`。
 
 ## 第 3 步：下载并解压两个项目
 
-从 Gitee 下载（国内网络更快，已实测约 3 秒）：
+从 Gitee 下载（国内网络更快）：
 
 ```
 curl -L -o volcengine_aibot_scripts.zip https://gitee.com/adrninistrator/volcengine_aibot_scripts/repository/archive/master.zip
 curl -L -o chrome_capture_operate.zip https://gitee.com/adrninistrator/chrome_capture_operate/repository/archive/master.zip
 ```
 
-备选（GitHub，已实测可用且与 Gitee 内容一致）：
+备选（GitHub）：
 
 ```
 curl -L -o volcengine_aibot_scripts.zip https://github.com/Adrninistrator/volcengine_aibot_scripts/archive/refs/heads/master.zip
@@ -179,7 +189,7 @@ Expand-Archive chrome_capture_operate.zip -DestinationPath .
 
 其中 `<python路径>` 为第 1/2 步确认的 Python（已装则为 `python`，新装则为 `"%LOCALAPPDATA%\Programs\Python\Python312\python.exe"`）。
 
-> 使用阿里云 pip 镜像后，安装全部依赖实测约 13 秒（默认官方源约 2 分钟）。镜像不可用时去掉 `-i ...` 参数回退官方源。
+> 镜像不可用时去掉 `-i ...` 参数回退官方源。
 
 方式二：直接运行各项目的 `install.bat`（双击或命令行执行，需 `python` 已在 PATH 中，结束后会提示 install done）。
 

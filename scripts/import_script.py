@@ -7,10 +7,16 @@
 响应返回新 ServiceID 与新名称（原名+导入时间戳后缀），
 但不返回剧本ID（AgentID）——脚本会再查 agent/list（按 ServiceID 精确）获取。
 
+导入前自动处理（无需人工预处理，需要修改时在副本上进行、原文件不动）：
+data.meta.name 不带「_由AI修改」后缀时自动补上（标记由 AI 导入的剧本，
+保证由 AI 导入的剧本才允许由 AI 删除）；并按平台规则重算 checksum
+（内容被手工修改过也能正确导入，规则见
+prompt/剧本json文件HASH字段计算规则.md）。
+
 用法：
     python scripts/import_script.py "result/xxx_导出剧本/【存客】multi-agent v2.json" "电销项目组_测试"
 
-结果文件：result/{时间_账号_导入剧本}/import.json
+结果文件：result/{日期}/{时间_账号_导入剧本}/import.json
 提示：新导入剧本未发布（版本 0），文本对话测试前需先发布测试版本
       （运行 scripts/publish_preview.py）。
 """
@@ -50,6 +56,9 @@ def main() -> int:
     print(f"  新ServiceID:       {result.get('new_service_id')}")
     print(f"  项目组:            {result.get('group_name')}({result.get('group_id')})")
     print(f"  源文件:            {result.get('source_file')}")
+    if result.get("import_file") and \
+            result["import_file"] != result.get("source_file"):
+        print(f"  实际导入文件(副本): {result.get('import_file')}")
 
     if not result.get("new_agent_id"):
         print("\n警告：未能解析出新剧本ID，请用 search_script.py 按新名称搜索确认。")

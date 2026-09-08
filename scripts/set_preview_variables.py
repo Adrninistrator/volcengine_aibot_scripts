@@ -22,7 +22,7 @@ before/after 为 md 文件，\t 分隔各列，列含：名称、调用名称、
     python scripts/set_preview_variables.py llm_xxx \
         --file vars.json          # vars.json 为 {"调用名称": "值", ...}
 
-结果文件：result/{时间_账号_测试版本全局变量赋值}/before.md + after.md + summary.json
+结果文件：result/{日期}/{时间_账号_测试版本全局变量赋值}/before.md + after.md + summary.json
 说明：文本对话测试会直接使用这些值（作为对话 context 默认值）。
 """
 

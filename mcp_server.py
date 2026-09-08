@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """火山引擎智能外呼 MCP 服务（SSE，默认端口 19000，支持配置）。
 
-把 17 个独立脚本功能全部封装为 MCP 工具（共 27 个），供 AI 调用：
+把全部独立脚本功能封装为 MCP 工具（共 28 个），供 AI 调用：
 - 使用说明：usage_guide（运行前提、各工具用法、典型调用序列）
 - 账号：get_current_user（获取当前登录账号；所有工具内置账号守卫）
 - 项目组/剧本：query_project_groups、list_group_scripts、query_script、
@@ -18,18 +18,20 @@
 - 批量导出与内容搜索（2026-09-06 新增）：
   batch_export_scripts、search_exported_scripts
 - 查询通话明细（2026-09-06 新增）：query_call_records
+- 删除剧本（2026-09-07 新增）：delete_script（仅 _由AI修改 后缀）
 
 兼容 mcp SDK 1.x（FastMCP）与 2.x（MCPServer）两个大版本。
 
 同端口服务（prompt 新要求）：
-- HTTP 配置页 http://127.0.0.1:{port}/（监听端口与允许账号，写全局配置
-  ~/.volcengine_aibot_scripts/global.json）；
+- HTTP 配置页 http://127.0.0.1:{port}/（监听端口、是否允许执行修改操作开关
+  与允许账号，写全局配置 ~/.volcengine_aibot_scripts/global.json）；
 - MCP SSE 端点 http://127.0.0.1:{port}/sse；
 - 系统托盘（双击打开配置页，右键退出）；pythonw 运行无窗口。
 
-账号守卫（prompt 约定）：所有业务请求前校验当前登录账号（/console/api/v2/user
-的 id）是否为全局配置允许的账号；同一 Cookie 未变化时免重复检查；
-未配置账号时报错提示先到配置页设置。
+修改守卫（prompt 约定，2026-09-07）：修改类操作执行前先检查「是否允许执行
+修改操作」开关（默认关闭，未开启拒绝并弹配置页），再校验当前登录账号
+（/console/api/v2/user 的 id）是否为全局配置允许的账号；同一 Cookie 未变化
+时免重复检查；未配置账号时报错提示先到配置页设置。
 
 运行前提：
 1) install.bat 安装依赖（requests mcp uvicorn sse-starlette websockets）；
@@ -186,10 +188,13 @@ _USAGE_GUIDE = {
 - query_script(script_id)：按剧本ID查详情（名称/ServiceID/GroupID/版本状态）。
 - search_script(keyword)：按名称或ID模糊搜索（不确定剧本ID时用）。
 - export_script(script_id)：导出剧本 JSON 到 result 目录，返回文件路径。
-  ⚠ 导出文件含服务端 checksum，导入必须使用原样文件，手工修改会被校验拒绝。
+  文件含服务端 checksum；手工修改内容后仍可直接 import_script
+  （导入时自动重算 checksum）。
 - import_script(file_path, group_name)：导入剧本到项目组 → 返回新剧本ID
-  （new_agent_id，llm_xxx）。file_path 用 export_script 返回的路径；
-  group_name 精确匹配（先 query_project_groups 查可用名称）。
+  （new_agent_id，llm_xxx）。file_path 用 export_script 返回的路径，手工
+  修改过的文件也可直接导入（在副本上自动补「_由AI修改」后缀并重算
+  checksum，原文件不动，无需人工预处理）；group_name 精确匹配（先
+  query_project_groups 查可用名称）。
   ⚠ 新剧本未发布（版本0），对话测试前必须 publish_preview。
 
 复制剧本完整链路：
@@ -223,11 +228,12 @@ query_variables → update_variable → publish_preview → start_dialog ...
 "import_export": (
 """## 导入/导出剧本
 
-- export_script(script_id)：导出剧本 JSON（写入 result/{时间_账号_导出剧本}/），
-  返回 export_file 路径、文件名、大小；
+- export_script(script_id)：导出剧本 JSON（写入 result/{日期}/{时间_账号_导出剧本}/），
+  返回 export_file 路径、文件名、大小（文件含服务端 checksum）；
 - import_script(file_path, group_name)：
-  - file_path：export_script 返回的 export_file（原样文件，含服务端 checksum，
-    手工修改内容会被导入校验拒绝）；
+  - file_path：剧本 JSON 文件路径，export_script 返回的 export_file 或
+    手工修改过的文件（导入前在副本上自动补「_由AI修改」后缀并重算
+    checksum，原文件不动，无需人工预处理）；
   - group_name：目标项目组名称，精确匹配（先用 query_project_groups 查询）；
   - 返回 new_agent_id（新剧本ID）、new_script_name（原名+导入时间戳后缀）、
     new_service_id；
@@ -287,6 +293,11 @@ publish_preview(script_id, description?)
 - Cookie 服务不可达 / 获取 Cookie 失败：chrome_capture_operate 未启动，
   或插件未推送（确认插件已装、推送范围允许 volcengine.com、
   Chrome 已登录火山引擎控制台）；
+- 修改类操作报「是否允许执行修改操作开关未开启」：该开关默认关闭，
+  需人工在 Web 配置页「配置参数」中勾选并保存（AI 无法代开）；
+- 修改类操作报「未配置允许账号 / 账号不在允许范围」：在配置页设置
+  「允许执行修改操作的账号」（建议测试环境账号），并确认 Chrome 登录
+  的是该账号；
 - 接口 HTTP 401/403：Chrome 里重新登录火山引擎控制台（服务会自动重取
   Cookie 重试一次）；
 - “剧本ID xxx 无精确匹配”：剧本ID 拼写错误，用 search_script 搜索；
@@ -294,7 +305,8 @@ publish_preview(script_id, description?)
 - “会话不存在”：MCP 服务重启过（会话存内存），重新 start_dialog；
 - end_dialog 结果 available=false：对话分析接口返回空（2026-09-03 抓包同
   现象，服务端疑点），对话全文已保存至 result 目录；
-- import_script 被拒：必须用 export_script 导出的原样文件（含 checksum）；
+- import_script 报「文件读取/处理失败」：文件不是合法的剧本 JSON
+  （须为 export_script 导出的文件或在其基础上修改）；
 - “变量 xxx 不存在”：调用名称（key）拼写问题，先 query_variables。"""
 ),
 "agents_info": (
@@ -307,7 +319,7 @@ publish_preview(script_id, description?)
   ASR 引用热词表/ASR 上传上下文（开启/未开启）/挂载的分析Agent
   （信息抽取/线索定级/通话总结 各 ID/名称/状态/更新时间）/
   测试版本与线上版本发布（版本号/状态/更新时间）；
-- 结果写入 result/{时间_账号_查询剧本基本信息}/。
+- 结果写入 result/{日期}/{时间_账号_查询剧本基本信息}/。
 
 **Sub Agent（Multi Agents 剧本）**
 - get_sub_agents(script_id)：Sub Agent 清单（ID/名称/顺序）；
@@ -531,8 +543,8 @@ def export_script(script_id: str) -> dict:
     """导出剧本为 JSON 文件（写入 result 目录）。
 
     - script_id: 剧本ID（llm_xxx）
-    返回导出文件路径、文件名、大小。注意导出文件含服务端 checksum，
-    导入时须使用原样文件，勿手工修改内容。
+    返回导出文件路径、文件名、大小。导出文件含服务端 checksum 字段；
+    手工修改内容后仍可直接 import_script 导入（导入时会自动重算 checksum）。
     """
     client = _get_client()
     coords = client.resolve_script(script_id)
@@ -546,20 +558,31 @@ def export_script(script_id: str) -> dict:
         "export_file": str(path),
         "filename": filename,
         "size_bytes": len(content),
-        "hint": "导入请使用该原样文件（import_script）",
+        "hint": "可手工修改内容后 import_script 导入（自动补后缀+重算 checksum）",
     }
 
 
 @mcp.tool()
 @tool_with_detail
 def import_script(file_path: str, group_name: str) -> dict:
-    """导入剧本文件到指定项目组，生成新剧本（须为 export_script 导出的原样文件）。
+    """导入剧本文件到指定项目组，生成新剧本（导入校验自动处理）。
 
-    - file_path: 导出的剧本 JSON 文件路径（export_script 返回的 export_file）
+    - file_path: 剧本 JSON 文件路径（export_script 返回的 export_file；
+      手工修改过的文件也可直接导入，无需预处理）
     - group_name: 目标项目组名称（精确匹配，如 电销项目组_测试；
       可先用 query_project_groups 查询可用名称）
+    **导入前自动完成**（prompt 约定，使用者无需任何操作；需要修改时在
+    副本上进行，传入的原文件保持不动）：
+    - `data.meta.name`（剧本名称）不带「_由AI修改」后缀 → 自动补上（已带
+      后缀——含时间戳形态「xxx_由AI修改(2026...)」——则不重复加）。
+      名称加该后缀是为了**标记由 AI 导入的剧本，保证由 AI 导入的剧本才
+      允许由 AI 删除**（delete_script 同一后缀约束），人工维护的剧本不会
+      被 AI 误删；
+    - 重算 checksum 并修正失配值（内容被手工修改过时），以通过火山引擎
+      管理台后台校验（否则被拒，Code=101 文件已被修改）。
     返回新剧本信息：new_agent_id（新剧本ID，llm_xxx）、new_script_name、
-    new_service_id 等。新剧本未发布（版本0），对话测试前需 publish_preview。
+    new_service_id、import_file（实际上传的文件，与传入文件不同时为
+    处理后的副本）等。新剧本未发布（版本0），对话测试前需 publish_preview。
     """
     client = _get_client()
     result = client.import_script(file_path, group_name=group_name)
@@ -571,8 +594,41 @@ def import_script(file_path: str, group_name: str) -> dict:
         "new_service_id": result.get("new_service_id"),
         "group_name": result.get("group_name"),
         "group_id": result.get("group_id"),
+        "import_file": result.get("import_file"),
         "result_file": str(out_dir / "import.json"),
         "hint": "新剧本未发布，对话测试前请先 publish_preview",
+    }
+
+
+@mcp.tool()
+@tool_with_detail
+def delete_script(script: str, group_name: str | None = None) -> dict:
+    """删除剧本（修改操作，谨慎使用）。
+
+    - script：**剧本ID（llm_xxx）或剧本名称**均可——只知道名称时经
+      agent/list 精确解析后删除（重名会报错并提示改用ID）；
+    - group_name：可选，限定项目组（校验剧本在该组，防跨组误删）；
+    **安全约束（prompt 约定）**：仅当剧本名称以「_由AI修改」为后缀
+    （兼容导入时间戳形态「xxx_由AI修改(20260907...)」）才允许删除——
+    双重校验（本地 + 调火山接口反查最新名称确认后缀），
+    其他剧本一律拒绝。删除后回查列表确认已移除。
+    返回 {script_id, script_name, deleted, remain_count, result_file}。
+    """
+    client = _get_client()
+    r = client.delete_script(script, group_name=group_name)
+    out_dir = new_result_dir("删除剧本")
+    write_json(out_dir / "delete.json", r)
+    return {
+        "script_id": r["script_id"],
+        "script_name": r["script_name"],
+        "group_id": r["group_id"],
+        "group_name": r.get("group_name") or "",
+        "deleted": r["deleted"],
+        "remain_count": r["remain_count"],
+        "result_file": str(out_dir / "delete.json"),
+        "note": "仅允许删除名称以 _由AI修改 为后缀的剧本；"
+                "删除后回查列表确认" if r["deleted"] else
+                "⚠ 回查仍存在，请到控制台人工确认",
     }
 
 
@@ -948,9 +1004,11 @@ def get_current_user() -> dict:
     """获取当前登录的账号（GET /console/api/v2/user，id 即账号）。
 
     返回 {account(id), username, email, type}。
-    说明：所有其他工具执行请求前会自动做账号守卫——校验当前登录账号
-    是否为全局配置中允许的账号（同一 Cookie 未变化时免重复检查）；
-    若全局配置未设置允许账号，会报错提示先在配置页设置。
+    说明：所有其他工具执行请求前会自动做修改守卫——修改类操作需要
+    全局配置中「是否允许执行修改操作」开关已开启（默认关闭，人工在
+    配置页设置），且当前登录账号为允许的账号（同一 Cookie 未变化时
+    免重复检查）；开关未开启或账号未配置/不匹配时修改类操作会报错
+    提示先在配置页设置。查询类操作不受影响。
     """
     user = _get_client().get_current_user()
     return {"account": str(user.get("id")), "username": user.get("username"),
@@ -974,7 +1032,7 @@ def query_script_info(script_id: str) -> dict:
     挂载的分析Agents（信息抽取/线索定级/通话总结，
     各含 ID/名称/状态/更新时间）、测试版本与线上版本发布
     （版本号/状态/更新时间）。
-    结果同时写入 result/{时间_账号_查询剧本基本信息}/。
+    结果同时写入 result/{日期}/{时间_账号_查询剧本基本信息}/。
     """
     info = _get_client().get_script_info(script_id)
     import datetime
@@ -1011,7 +1069,7 @@ def get_sub_agent_info(script_id: str, sub_agent_id: str) -> dict:
     """查询单个 Sub Agent 的 LLM 模型与提示词配置。
 
     返回 ModelType（LLM 模型名）与提示词全文（系统/开场白）；
-    提示词可达 60KB，全文落盘 result/{时间_账号_查询SubAgent配置}/，
+    提示词可达 60KB，全文落盘 result/{日期}/{时间_账号_查询SubAgent配置}/，
     返回摘要（长度+前200字）与文件路径，供按需 Read 读取分析。
     """
     client = _get_client()
@@ -1078,7 +1136,7 @@ def query_analysis_agents(agent_type: str | None = None) -> dict:
 def get_analysis_agent(agent_id: str) -> dict:
     """获取分析Agent内容：系统提示词/用户提示词/状态/更新时间/模型参数。
 
-    提示词全文落盘 result/{时间_账号_获取分析Agent内容}/{AgentID}.json（含
+    提示词全文落盘 result/{日期}/{时间_账号_获取分析Agent内容}/{AgentID}.json（含
     AgentConfig 原始结构），返回摘要（提示词长度+前200字/模型名/状态）
     与文件路径，供按需 Read 读取分析。
     """
@@ -1258,7 +1316,7 @@ def query_call_records(group_name: str, script_id: str,
     返回 {total, records: [{被叫号码/主叫号码/接通状态/SIP状态码/
     通话时长秒/交互轮次/环境类型/命中语音助手/意向等级/信息抽取/
     短信状态/创建时间/通话ID}]}（单页模式另带 page_index/total_pages）。
-    结果落盘 result/{时间_账号_查询通话明细}/records.json + md。
+    结果落盘 result/{日期}/{时间_账号_查询通话明细}/records.json + md。
     """
     client = _get_client()
     r = client.query_call_records(
@@ -1335,12 +1393,20 @@ def search_exported_scripts(keyword: str,
         raise _ToolError("缺少 keyword（要搜索的关键字）")
 
     def _find_export_dirs() -> list[Path]:
+        # 两层结构（prompt 2026-09-07 result/{日期}/...），兼容旧一级
         if not RESULT_DIR.is_dir():
             return []
-        return sorted((d for d in RESULT_DIR.iterdir()
-                       if d.is_dir()
-                       and d.name.endswith(EXPORT_DIR_SUFFIX)),
-                      reverse=True)
+        found = []
+        for d in RESULT_DIR.iterdir():
+            if not d.is_dir():
+                continue
+            if d.name.endswith(EXPORT_DIR_SUFFIX):
+                found.append(d)
+            elif d.name.isdigit():
+                found.extend(x for x in d.iterdir()
+                             if x.is_dir()
+                             and x.name.endswith(EXPORT_DIR_SUFFIX))
+        return sorted(found, reverse=True)
 
     def _load_manifest(d: Path) -> dict:
         mf = d / "清单.json"
@@ -1366,8 +1432,16 @@ def search_exported_scripts(keyword: str,
     if export_dir:
         p = Path(export_dir)
         if not p.is_absolute():
-            p = (RESULT_DIR / export_dir
-                 if (RESULT_DIR / export_dir).exists() else p)
+            # 兼容目录名（旧一级）与 日期层/目录名（新结构）
+            for cand in ([RESULT_DIR / export_dir]
+                         + [RESULT_DIR / day / export_dir
+                            for day in sorted(
+                                (d.name for d in RESULT_DIR.iterdir()
+                                 if d.is_dir() and d.name.isdigit()),
+                                reverse=True)]):
+                if cand.is_dir():
+                    p = cand
+                    break
         target = p if p.is_dir() else None
     else:
         dirs = _find_export_dirs()

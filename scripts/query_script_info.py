@@ -15,7 +15,7 @@
     python scripts/query_script_info.py llm_xxx
     python scripts/query_script_info.py llm_xxx --group 脚本测试项目组
 
-结果文件：result/{时间_账号_查询剧本基本信息}/{剧本ID}.json + {剧本ID}.md
+结果文件：result/{日期}/{时间_账号_查询剧本基本信息}/{剧本ID}.json + {剧本ID}.md
 """
 
 from __future__ import annotations

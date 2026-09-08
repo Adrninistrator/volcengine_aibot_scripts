@@ -14,7 +14,7 @@
     python scripts/query_analysis_agents.py --type 信息抽取
     python scripts/query_analysis_agents.py --type 通话总结 --type 线索定级
 
-结果文件：result/{时间_账号_查询分析Agent}/agents.json + agents.md
+结果文件：result/{日期}/{时间_账号_查询分析Agent}/agents.json + agents.md
 """
 
 from __future__ import annotations

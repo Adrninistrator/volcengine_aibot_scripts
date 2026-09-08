@@ -14,7 +14,7 @@
     python scripts/publish_preview.py llm_xxx --description "zzz-剧本发布测试版本-标志"
     python scripts/publish_preview.py llm_xxx --timeout 900 --interval 5
 
-结果文件：result/{时间_账号_发布剧本测试版本}/publish.json
+结果文件：result/{日期}/{时间_账号_发布剧本测试版本}/publish.json
 """
 
 from __future__ import annotations

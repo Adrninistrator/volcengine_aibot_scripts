@@ -6,8 +6,10 @@
 
 配置项：
 - server_port     监听端口（HTTP 配置页 + MCP SSE 同端口，默认 19000，改后需重启）
-- allowed_account 允许操作的账号（唯一，数字字符串；为空表示未配置，
-                   此时工具执行前应提醒先到配置页设置）
+- allow_mutation  是否允许执行修改操作（prompt 2026-09-07：开启后才允许
+                  执行修改类操作，默认关闭；只允许人工在配置页修改）
+- allowed_account 允许执行修改操作的账号（唯一，数字字符串；为空表示
+                   未配置，此时工具执行前应提醒先到配置页设置）
 
 并发安全（prompt：客户端重连要求之外的实际竞态防护）：
 - **跨进程文件锁**：读写经 .lock 文件 + msvcrt（Windows）排他锁，
@@ -31,6 +33,7 @@ _LOCK_FILE = CONFIG_DIR / ".global.json.lock"
 
 DEFAULTS: dict[str, Any] = {
     "server_port": 19000,
+    "allow_mutation": False,
     "allowed_account": "",
 }
 
@@ -172,6 +175,16 @@ def set_allowed_account(account: str) -> dict:
 
 def get_allowed_account() -> str:
     return str(load_config().get("allowed_account") or "").strip()
+
+
+def get_allow_mutation() -> bool:
+    """是否允许执行修改操作（prompt 2026-09-07，默认关闭）。"""
+    return bool(load_config().get("allow_mutation"))
+
+
+def set_allow_mutation(enabled: bool) -> dict:
+    """设置是否允许执行修改操作（仅人工经配置页操作）。"""
+    return save_config({"allow_mutation": bool(enabled)})
 
 
 def get_server_port() -> int:

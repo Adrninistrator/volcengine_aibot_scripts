@@ -6,13 +6,13 @@
       llm/dialogue_flow_script/export?group_id={g}
 响应为文件下载流（application/octet-stream），内容为 {"data":..., "checksum":...}。
 
-注意：导出文件含服务端生成的 checksum（无法本地构造），
-修改内容后导入可能被服务端校验拒绝，导入请使用导出原样文件。
+注意：导出文件含服务端 checksum；手工修改内容后仍可直接导入
+（import_script 导入前会自动补「_由AI修改」后缀并重算 checksum）。
 
 用法：
     python scripts/export_script.py llm_xxx
 
-结果文件：result/{时间_账号_导出剧本}/{剧本名}.json + info.json
+结果文件：result/{日期}/{时间_账号_导出剧本}/{剧本名}.json + info.json
 """
 
 from __future__ import annotations
@@ -70,7 +70,8 @@ def main() -> int:
     print(f"  导出文件: {export_path}")
     print(f"  大小: {len(content)} 字节，sha256: {sha256[:16]}...")
     print(f"  信息文件: {info_path}")
-    print("\n提示：导出文件含服务端 checksum，请原样用于导入，勿手工修改内容。")
+    print("\n提示：导出文件可手工修改内容后直接导入"
+          "（import_script 会自动补「_由AI修改」后缀并重算 checksum）。")
     return 0
 
 

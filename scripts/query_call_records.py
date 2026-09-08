@@ -23,7 +23,7 @@
 命中语音助手输出三态：是/否/未启用识别能力（IsNonhumanAnswer
 true/false/键缺失）。
 
-结果文件：result/{时间_账号_查询通话明细}/records.json + records.md
+结果文件：result/{日期}/{时间_账号_查询通话明细}/records.json + records.md
 """
 
 from __future__ import annotations

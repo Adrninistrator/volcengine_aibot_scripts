@@ -9,7 +9,7 @@
     python scripts/query_project_groups.py
     python scripts/query_project_groups.py --cookie-api http://127.0.0.1:33445
 
-结果文件：result/{时间_账号_查询项目组}/groups.json
+结果文件：result/{日期}/{时间_账号_查询项目组}/groups.json
 """
 
 from __future__ import annotations

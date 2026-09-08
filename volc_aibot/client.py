@@ -32,7 +32,8 @@ import urllib3
 from .config import BASE_URL, DEFAULT_COOKIE_API, DEFAULT_TIMEOUT, \
     PERMISSION_RESOURCE, PRODUCT_ID
 from .cookie_client import query_cookies
-from .global_config import get_allowed_account, get_server_port
+from .global_config import (get_allow_mutation, get_allowed_account,
+                            get_server_port)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -67,6 +68,83 @@ AGENT_MODE_NAMES = {
 def agent_mode_name(mode) -> str:
     """AgentMode 数值 -> 剧本类型名称（未知值返回原值字符串）。"""
     return AGENT_MODE_NAMES.get(mode, str(mode or ""))
+
+
+# 剧本名称安全后缀（prompt 2026-09-07）：仅允许删除/导入以该后缀命名的
+# 剧本——AI 修改产生的剧本统一带此后缀，防止误删/误导入人工维护的剧本
+AI_MODIFIED_SUFFIX = "_由AI修改"
+
+# 导入后服务端会在剧本名称末尾追加时间戳后缀（如「(20260907195508)」，
+# 原名 + 导入时刻），实际名称形如「xxx_由AI修改(20260907195508)」——
+# 后缀判断需先剥掉该时间戳再比对 _由AI修改（prompt 2026-09-07 补充）
+IMPORT_TS_SUFFIX_RE = re.compile(r"\(\d{14}\)$")
+
+
+def has_ai_modified_suffix(name: str) -> bool:
+    """剧本名称是否带 _由AI修改 后缀（兼容导入时间戳后缀）。
+
+    「xxx_由AI修改」与「xxx_由AI修改(20260907195508)」均判定为带后缀。
+    """
+    name = str(name or "").strip()
+    if name.endswith(AI_MODIFIED_SUFFIX):
+        return True
+    stripped = IMPORT_TS_SUFFIX_RE.sub("", name).strip()
+    return stripped.endswith(AI_MODIFIED_SUFFIX)
+
+
+def prepare_import_file(path: str | Path,
+                        target: str | Path | None = None) -> tuple[Path, dict]:
+    """导入前自动处理剧本 JSON 文件：需要修改时写**副本**，原文件不动。
+
+    1. data.meta.name（剧本名称）不以「_由AI修改」为后缀（兼容时间戳
+       形态，不重复追加）→ 在副本上自动补上（prompt 2026-09-07：拷贝后
+       增加后缀）。该后缀标记由 AI 导入的剧本——保证由 AI 导入的剧本
+       才允许由 AI 删除（与 delete_script 的后缀约束一致），人工维护
+       的剧本不会被 AI 误删；
+    2. 无论是否补后缀，都按规则重算 checksum（sha256(GoMarshal(data))，
+       规则见 prompt/剧本json文件HASH字段计算规则.md）——与文件内声明值
+       失配（内容被手工修改过）时在副本上写回修正，以通过管理台后台
+       校验（否则导入被拒，Code=101 文件已被修改）。
+    名称已带后缀且 checksum 一致时**原样使用原文件**（不产生副本）。
+    - target: 副本路径；缺省放原文件同目录、以处理后的剧本名称命名，
+      与原文件同名（已带后缀仅修 HASH 的场景）时退回「原文件名_导入」
+      防止覆盖原文件。
+    返回 (实际用于导入的文件路径, {name: 处理后剧本名称,
+          suffix_added: 是否补了后缀, checksum_refreshed: 是否重算了
+          checksum, copy: 副本路径或 None})。
+    因此导出文件即使被手工修改过，也可直接导入，无需人工预处理。
+    """
+    from .gojson import calc_checksum, dump_json_text, load_json_text
+    from .result import safe_filename
+    file_path = Path(path)
+    doc = load_json_text(file_path.read_bytes())
+    data = doc.get("data") or {}
+    meta = data.get("meta") or {}
+    name = str(meta.get("name") or "")
+    suffix_added = False
+    # 后缀判断兼容时间戳形态（prompt 2026-09-07：导入后名称可能带
+    # (yyyyMMddHHmmss) 后缀——「xxx_由AI修改(20260907...)」也算已带
+    # 后缀，不重复追加）
+    if not has_ai_modified_suffix(name):
+        name = name + AI_MODIFIED_SUFFIX
+        meta["name"] = name
+        data["meta"] = meta
+        suffix_added = True
+    declared = str(doc.get("checksum") or "")
+    local = calc_checksum(data)
+    if not (suffix_added or local != declared):
+        return file_path, {"name": name, "suffix_added": False,
+                           "checksum_refreshed": False, "copy": None}
+    if target is None:
+        cand = file_path.with_name(safe_filename(name) + ".json")
+        # 副本与原文件同名（已带后缀、仅修 HASH）时退回 _导入 后缀防覆盖
+        target = (cand if cand != file_path else
+                  file_path.with_name(file_path.stem + "_导入" + file_path.suffix))
+    copy_path = Path(target)
+    copy_path.write_text(
+        dump_json_text({"data": data, "checksum": local}), encoding="utf-8")
+    return copy_path, {"name": name, "suffix_added": suffix_added,
+                       "checksum_refreshed": True, "copy": str(copy_path)}
 
 # 剧本 config DialogAnalysisCfg 中分析Agent挂载键名（2026-09-06 15:45
 # 抓包实证：llm_tvok_cdjci 同时挂载 3 类，值均为字符串 AgentId）
@@ -121,6 +199,10 @@ class NotConfigured(RuntimeError):
 
 class AccountNotAllowed(RuntimeError):
     """当前登录账号不在允许操作范围，拒绝执行请求。"""
+
+
+class MutationDisabled(RuntimeError):
+    """全局配置未开启「是否允许执行修改操作」开关，拒绝执行修改请求。"""
 
 
 def unwrap(body: Any, what: str = "接口") -> Any:
@@ -299,29 +381,44 @@ class VolcAIBotClient:
                 port)
 
     def ensure_account_allowed(self, mutating: bool = False) -> None:
-        """账号守卫：**修改操作**执行前校验当前登录账号是否为允许的账号。
+        """修改守卫：修改操作开关 + 允许账号双重校验。
 
-        规则（prompt 约定，2026-09-04 更新）：
-        - 仅**修改类操作**（发布/变量修改/变量赋值）需要校验；查询类不拦截；
-        - 校验时调 /console/api/v2/user 获取登录账号；
+        规则（prompt 约定，2026-09-07 更新）：
+        - 仅**修改类操作**（发布/变量修改/变量赋值/删除）需要校验；
+          查询类不拦截；
+        - 全局配置 allow_mutation 为 False（默认）-> 抛 MutationDisabled，
+          并**自动弹出网页配置参数页面**提醒用户开启（Web 服务未运行或
+          弹页失败时仅文字提示；同一进程只弹一次）；
+        - 开关开启后：校验时调 /console/api/v2/user 获取登录账号；
         - 同一 cookie 头（未变化）已通过过检查 -> 跳过重复检查；
-        - 全局配置 allowed_account 为空 -> 抛 NotConfigured，并**自动弹出
-          网页配置参数页面**提醒用户配置（Web 服务未运行或弹页失败时仅
-          文字提示；同一进程只弹一次，避免反复打扰）；
+        - 全局配置 allowed_account 为空 -> 抛 NotConfigured（同样弹配置页）；
         - 登录账号 != 允许账号 -> 抛 AccountNotAllowed，不执行请求。
-        - mutating=False 时只做“预检提示”：账号已配置但不匹配时仅记日志
-          警告，不拦截（查询类不受限制）。
+        - mutating=False 时只做“预检提示”：开关关闭或账号不匹配时仅记
+          日志警告，不拦截（查询类不受限制）。
         """
         if not self.enforce_account:
             return
+        if not get_allow_mutation():
+            if not mutating:
+                self.logger.warning(
+                    "「是否允许执行修改操作」开关未开启（查询不受影响，"
+                    "修改类操作将被拒绝，可到配置页开启）")
+                return
+            self._open_config_page()
+            raise MutationDisabled(
+                "「是否允许执行修改操作」开关未开启（默认关闭），已拒绝执行"
+                "修改请求：请在弹出的配置页（或手动打开 "
+                f"http://127.0.0.1:{get_server_port()}/ ，系统托盘双击可达）"
+                "的「配置参数」中勾选「是否允许执行修改操作」后保存。"
+                "该开关只允许人工修改")
         allowed = get_allowed_account()
         if not allowed:
             if mutating:
                 self._open_config_page()
                 raise NotConfigured(
-                    "未配置修改操作允许执行的账号：请在弹出的配置页"
+                    "未配置允许执行修改操作的账号：请在弹出的配置页"
                     f"（或手动打开 http://127.0.0.1:{get_server_port()}/ ，"
-                    "系统托盘双击可达）设置“修改操作允许执行的账号”。"
+                    "系统托盘双击可达）设置「允许执行修改操作的账号」。"
                     "建议配置测试环境的账号，以保证生产环境账号数据"
                     "不被误修改")
             return   # 查询类：未配置账号不拦截
@@ -635,17 +732,27 @@ class VolcAIBotClient:
     def import_script(self, file: str | Path,
                       group_name: str | None = None,
                       group_id: int | None = None) -> dict:
-        """导入剧本：multipart 上传导出 JSON 文件到指定项目组。
+        """导入剧本：multipart 上传剧本 JSON 文件到指定项目组。
 
-        - file: 导出的剧本 JSON 文件路径；
+        - file: 剧本 JSON 文件路径（手工修改过的文件也可直接导入——
+          导入前在副本上自动补「_由AI修改」后缀并重算 checksum，原文件
+          保持不动，见 prepare_import_file）；
         - group_name / group_id 二选一（group_name 经项目组接口精确解析）；
-        返回 {group_id, group_name, source_file, ServiceID, ServiceName,
-               new_agent_id(剧本ID), ...}。
+        返回 {group_id, group_name, source_file, import_file(实际上传的
+               文件，与 source_file 不同时为处理后的副本), ServiceID,
+               ServiceName, new_agent_id(剧本ID), ...}。
         注意：导入响应不含 AgentID，需再查 agent/list（按 ServiceID 精确）获取。
         """
         path = Path(file)
         if not path.is_file():
             raise ApiError(f"导入文件不存在: {path}")
+        # 导入前自动处理（prompt 2026-09-07）：副本上补 _由AI修改 后缀 +
+        # 重算 checksum 修正失配——原文件不动，导出文件手工修改后也无需
+        # 人工预处理
+        try:
+            import_path, _prep = prepare_import_file(path)
+        except (ValueError, OSError) as e:
+            raise ApiError(f"导入文件读取/处理失败（名称后缀与HASH）: {e}")
         if group_name:
             group = self.find_group(group_name)
             group_id = group["id"]
@@ -653,8 +760,8 @@ class VolcAIBotClient:
         if group_id is None:
             raise ApiError("必须指定目标项目组（group_name 或 group_id）")
 
-        content = path.read_bytes()
-        files = {"File": (path.name, content, "application/json")}
+        content = import_path.read_bytes()
+        files = {"File": (import_path.name, content, "application/json")}
         body = self._request_json(
             "POST", f"{BASE_URL}/console/api/v2/llm/agent/import",
             params={"GroupID": group_id}, files=files,
@@ -662,7 +769,7 @@ class VolcAIBotClient:
             what="导入剧本")
         result = unwrap(body, "导入剧本") or {}
         service_id = result.get("ServiceID")
-        service_name = result.get("ServiceName") or path.stem
+        service_name = result.get("ServiceName") or import_path.stem
 
         # 新剧本的 AgentID：优先按 ServiceID 精确查询
         new_agent_id = ""
@@ -685,10 +792,110 @@ class VolcAIBotClient:
             "group_name": group_name,
             "source_file": str(path),
             "source_file_name": path.name,
+            "import_file": str(import_path),
             "new_service_id": service_id,
             "new_script_name": service_name,
             "new_agent_id": new_agent_id,
             "new_agent": new_agent,
+        }
+
+    # ---------------------------------------------------------------- 删除剧本
+
+    def delete_script(self, script: str,
+                      group_name: str | None = None) -> dict:
+        """删除剧本（修改操作，DELETE services/{ServiceID}）。
+
+        script：剧本ID（llm_xxx）**或剧本名称**（名称经 agent/list
+        Name 参数解析为精确坐标——只知道名称也可删除）。
+        group_name：可选限定项目组（删除前校验剧本在该组）。
+
+        安全约束（prompt 2026-09-07，双重校验）：
+        1. 本地解析后先检查名称后缀；
+        2. 再调火山接口反查该剧本最新名称（agent/list 按 ServiceID
+           精确）确认仍以「_由AI修改」为后缀——**以后端查询为准**，
+           防止本地缓存过期误删。仅当名称以 _由AI修改 结尾才执行删除。
+        删除后回查列表确认已移除。
+        返回 {script_id, script_name, group_id, group_name, deleted,
+              remain_count}。
+        """
+        # 名称或ID 解析（Name 参数同时模糊匹配两者；均做精确匹配）
+        agent = self.query_script(script) if str(script).startswith("llm_") \
+            else self._find_script_by_name(script)
+        coords = self._agent_to_coords(agent)
+        sid = agent.get("AgentID") or ""
+        name = agent.get("AgentName") or ""
+        gid = agent.get("GroupID")
+        if group_name:
+            group = self.find_group(group_name)
+            if gid != group["id"]:
+                raise ApiError(
+                    f"剧本 {sid} 不在项目组 {group_name}"
+                    f"（实际 GroupID={gid}），拒绝删除")
+        # 后缀校验（本地第一道；兼容导入时间戳后缀 xxx_由AI修改(20xx...)）
+        if not has_ai_modified_suffix(name):
+            raise ApiError(
+                f"删除被拒绝：剧本 {sid} 的名称「{name}」"
+                f"不以「{AI_MODIFIED_SUFFIX}」为后缀。"
+                f"仅允许删除名称以「{AI_MODIFIED_SUFFIX}」结尾的剧本"
+                f"（AI 修改产生的剧本）")
+        # 后端反查最新名称（第二道，防本地缓存过期）：按 ServiceID 精确
+        fresh_agents, _ = self.list_agents(
+            service_id=coords["service"])
+        fresh = next((a for a in fresh_agents
+                      if a.get("AgentID") == sid), None)
+        fresh_name = (fresh or {}).get("AgentName") or name
+        if fresh is None:
+            raise ApiError(
+                f"删除被拒绝：后端反查未找到剧本 {sid}（可能已被删除或"
+                f"权限变化），不执行删除")
+        if not has_ai_modified_suffix(fresh_name):
+            raise ApiError(
+                f"删除被拒绝：后端最新名称「{fresh_name}」"
+                f"不以「{AI_MODIFIED_SUFFIX}」为后缀（本地信息已过期）")
+        body = self._request_json(
+            "DELETE",
+            f"{BASE_URL}/console/api/v2/projects/{coords['project']}"
+            f"/products/{self.product}/services/{coords['service']}",
+            params={"group_id": coords["group"]},
+            payload={}, what="删除剧本", mutating=True)
+        unwrap(body, "删除剧本")
+        # 删除后回查（刷新确认；翻页收集该组全部）
+        agents = self.list_group_all_scripts(gid)
+        remain = [a for a in agents if a.get("AgentID") == sid]
+        return {
+            "script_id": sid,
+            "script_name": fresh_name,
+            "group_id": gid,
+            "group_name": group_name or "",
+            "deleted": not remain,
+            "remain_count": len(remain),
+        }
+
+    def _find_script_by_name(self, name: str) -> dict:
+        """按剧本名称精确查询（agent/list Name 模糊 -> 名称精确匹配）。"""
+        agents, _ = self.list_agents(name=name)
+        exact = [a for a in agents if a.get("AgentName") == name]
+        if not exact:
+            listed = "; ".join(f"{a.get('AgentName')}({a.get('AgentID')})"
+                               for a in agents[:12])
+            raise ApiError(f"未找到名称精确匹配的剧本: {name}"
+                           + (f"；相近候选: {listed}" if agents else ""))
+        if len(exact) > 1:
+            ids = ", ".join(a.get("AgentID") or "" for a in exact[:6])
+            raise ApiError(
+                f"剧本名称 {name} 匹配到多个剧本（{ids}），"
+                f"请改用剧本ID删除")
+        return exact[0]
+
+    @staticmethod
+    def _agent_to_coords(agent: dict) -> dict:
+        """agent/list 条目 -> 数字坐标 dict。"""
+        return {
+            "project": agent.get("ProjectID"),
+            "service": agent.get("ServiceID"),
+            "group": agent.get("GroupID"),
+            "agent_id": agent.get("AgentID") or "",
+            "agent_name": agent.get("AgentName") or "",
         }
 
     # ---------------------------------------------------------------- 发布

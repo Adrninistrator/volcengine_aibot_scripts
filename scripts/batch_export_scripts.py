@@ -21,7 +21,7 @@ volc_aibot/concurrency.py 说明）。
     python scripts/batch_export_scripts.py --group A --group B   # 多个项目组
     python scripts/batch_export_scripts.py --concurrency 8       # 并发导出
 
-结果文件：result/{时间_账号_批量导出剧本}/
+结果文件：result/{日期}/{时间_账号_批量导出剧本}/
 """
 
 from __future__ import annotations

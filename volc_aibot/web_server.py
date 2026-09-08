@@ -3,14 +3,15 @@
 
 页面结构（标签页，宽度 100%）：
 - MCP 接口：工具下拉框（名称+中文描述）选择后展示参数等详情；
-- 配置参数：监听端口（重启提示/双服务说明/SSE URL）、修改操作允许账号；
+- 配置参数：监听端口（重启提示/双服务说明/SSE URL）、是否允许执行修改
+  操作开关（prompt 2026-09-07，默认关闭）、允许执行修改操作的账号；
 - 使用说明 / 适用场景 / 提示词示例：读取项目 md/ 目录的 md 文件渲染，
   左侧标题目录 + 锚点跳转（布局参考 chrome_capture_operate 的 index.html）。
 
 后端路由：
     GET  /               页面（HTML）
     GET  /api/config     读取全局配置
-    POST /api/config     保存配置（端口 / 允许账号）
+    POST /api/config     保存配置（端口 / 修改操作开关 / 允许账号）
     GET  /api/tools      MCP 工具清单（名称/描述/参数）
     GET  /api/md?name=x  读取 md 目录下的 md 文件内容
 """
@@ -87,6 +88,9 @@ PAGE_HTML = """<!DOCTYPE html>
           display: flex; align-items: center; gap: 10px; }
  header .logo { font-size: 17px; font-weight: 700; color: #1f3a5f; }
  header .status { font-size: 12px; color: #6b7280; }
+ header .account-box { margin-left: auto; font-size: 13px; color: #374151;
+                       display: flex; align-items: center; gap: 8px; }
+ header .account-box b { color: #1f3a5f; }
  nav { background: #fff; border-bottom: 1px solid #ddd; padding: 0 12px;
        display: flex; }
  nav button { border: 0; background: none; padding: 12px 18px; cursor: pointer;
@@ -208,12 +212,17 @@ PAGE_HTML = """<!DOCTYPE html>
 <header>
   <span class="logo">火山引擎智能外呼工具</span>
   <span class="status" id="headStatus">加载中…</span>
+  <span class="account-box">当前火山账号：
+    <b id="head-account">未获取</b>
+    <button class="copy" onclick="refreshAccount()">获取账号</button>
+  </span>
 </header>
 
 <div id="account-alert" class="alert" style="display:none">
-  ⚠ <b>尚未配置「修改操作允许执行的账号」</b>——修改类操作（剧本变量修改、
-  变量赋值、发布测试版本）会被拒绝并提示配置。请在下方「<b>配置参数</b>」
-  标签页填写并保存（建议使用测试环境账号）。
+  ⚠ <b>修改类操作当前会被拒绝</b>——需要在「<b>配置参数</b>」标签页开启
+  「<b>是否允许执行修改操作</b>」（默认关闭）并填写「<b>允许执行修改操作的
+  账号</b>」后，剧本变量修改、变量赋值、发布测试版本等修改类操作才会放行
+  （查询不受影响，建议配置测试环境账号）。
   <a href="#" onclick="switchTab('config');return false;">点此前往配置 →</a>
 </div>
 
@@ -234,6 +243,7 @@ PAGE_HTML = """<!DOCTYPE html>
       <a class="active" data-tool="query" onclick="quickTool('query')">批量查询剧本信息</a>
       <a data-tool="search" onclick="quickTool('search')">批量搜索剧本内容</a>
       <a data-tool="agents" onclick="quickTool('agents')">批量下载搜索分析Agent</a>
+      <a data-tool="delete" onclick="quickTool('delete')">批量删除剧本</a>
     </nav>
     <div class="quick-body">
 
@@ -358,6 +368,31 @@ PAGE_HTML = """<!DOCTYPE html>
         <div id="a-result"></div>
       </div>
 
+      <div class="card" id="quick-panel-delete" style="display:none">
+        <h1>批量删除剧本</h1>
+        <div class="hint">查询项目组下名称以「_由AI修改」为后缀的剧本（仅展示
+          可删除的 AI 修改剧本，其他剧本不显示）。勾选一个或多个后执行删除；
+          删除前后台会再次调火山接口核对剧本名称后缀，未通过校验的剧本
+          拒绝删除。⚠ 删除不可恢复，请谨慎操作（建议配置测试环境账号）。</div>
+        <label>项目组范围</label>
+        <select id="d-group" style="max-width:360px;width:360px">
+          <option value="">（全部项目组）</option>
+        </select>
+        <div style="margin-top:12px">
+          <button class="primary" id="d-query-btn"
+                  onclick="loadDeletable()">查询可删除剧本</button>
+          <span id="d-msg" class="ok"></span>
+        </div>
+        <div id="d-result"></div>
+        <div class="progress-box">
+          <div class="progress-head">执行状态（实时·本工具独立展示）
+            <span class="ws-dot off" data-ws-dot></span></div>
+          <div class="progress-bar"><div id="pb-delete" class="progress-fill"></div></div>
+          <div id="pc-delete" class="progress-current">（空闲）</div>
+          <div id="pl-delete" class="progress-list" style="display:none"></div>
+        </div>
+      </div>
+
     </div>
   </div>
 </div>
@@ -402,16 +437,37 @@ PAGE_HTML = """<!DOCTYPE html>
       在命令行粘贴执行上面的安装命令后，即可在任意 Claude Code 会话中使用本工具。
     </div>
 
-    <label>修改操作允许执行的账号</label>
+    <label style="font-weight:400;margin-top:14px">
+      <input type="checkbox" id="allowMutation" style="width:auto">
+      <b>是否允许执行修改操作</b>（开启后才允许执行修改操作，默认关闭）
+    </label>
+    <div class="hint">
+      未开启时所有<b>修改类操作</b>（发布剧本测试版本、剧本变量修改、
+      测试版本全局变量赋值、删除剧本）都会被拒绝；查询类操作不受影响。
+      <b>该参数只允许人工修改</b>。
+    </div>
+
+    <label>允许执行修改操作的账号</label>
     <input id="account" type="text" placeholder="填写允许的账号ID（数字）">
     <div class="hint">
-      只允许配置一个账号。所有<b>修改类操作</b>（发布剧本测试版本、剧本变量修改、
-      测试版本全局变量赋值）执行前会校验当前 Chrome 登录账号，不一致则拒绝执行；
-      查询类操作不受限制。<br>
+      只允许配置一个账号。修改操作开关开启后，所有<b>修改类操作</b>
+      （发布剧本测试版本、剧本变量修改、测试版本全局变量赋值）执行前
+      会校验当前 Chrome 登录账号，不一致则拒绝执行；查询类操作不受限制。<br>
       <b>建议配置测试环境的账号</b>：在测试环境完成剧本修改后，再人工导入
-      测试环境使用的账号，以保证生产环境账号数据不被 AI 误修改。<br>
+      测试环境使用的账号，以保证生产环境账号数据不被 AI 误修改。
+      <b>该参数只允许人工修改，不允许 AI 修改</b>，以免使用错环境。<br>
       当前登录账号可用脚本查看：<code>scripts\\get_current_user.py</code>
       （加 <code>--save-allowed</code> 可直接保存为允许账号）。
+    </div>
+
+    <label style="font-weight:400;margin-top:14px">
+      <input type="checkbox" id="autostart" style="width:auto">
+      <b>系统自启动</b>（开机后自动运行本服务，默认不开启）
+    </label>
+    <div class="hint">
+      通过 Windows 注册表（当前用户 Run 键）配置：开启后开机自动以
+      pythonw 后台运行本服务（无窗口，系统托盘可见）；关闭即删除注册表项。
+      端口使用当前全局配置（改端口无需重新设置自启动）。
     </div>
 
     <button class="primary" onclick="save()">保存</button>
@@ -482,9 +538,13 @@ async function loadConfig() {
   const c = await r.json();
   document.getElementById('port').value = c.server_port;
   document.getElementById('account').value = c.allowed_account;
+  document.getElementById('allowMutation').checked = !!c.allow_mutation;
+  document.getElementById('autostart').checked = !!c.autostart;
   document.getElementById('headStatus').textContent =
-      '端口 ' + c.server_port + ' · ' + (c.allowed_account ?
-      '允许账号 ' + c.allowed_account : '未配置允许账号');
+      '端口 ' + c.server_port + ' · 修改操作' +
+      (c.allow_mutation ? '已允许' : '已禁止') + ' · ' +
+      (c.allowed_account ? '允许账号 ' + c.allowed_account
+                         : '未配置允许账号');
   bindCopyButtons(c.server_port);
 }
 
@@ -540,10 +600,22 @@ async function save() {
   }
   const r = await fetch('/api/config', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({server_port: port, allowed_account: account})
+      body: JSON.stringify({
+        server_port: port,
+        allowed_account: account,
+        allow_mutation: document.getElementById('allowMutation').checked
+      })
   });
   const c = await r.json();
   if (c.error) { alert(c.error); return; }
+  // 系统自启动（注册表，独立接口，随保存一起切换）
+  const wantAuto = document.getElementById('autostart').checked;
+  const ra = await fetch('/api/autostart', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: wantAuto})
+  });
+  const ca = await ra.json();
+  if (ca.error) { alert('自启动设置失败: ' + ca.error); return; }
   document.getElementById('msg').textContent = '已保存';
   setTimeout(() => location.reload(), 900);
 }
@@ -670,7 +742,12 @@ function renderMarkdown(text, idPrefix) {
   };
   const inlineMd = s => esc(s)
       .replace(/`([^`]+)`/g, '<code>$1</code>')
-      .replace(/\\*\\*([^*]+)\\*\\*/g, '<b>$1</b>');
+      .replace(/\\*\\*([^*]+)\\*\\*/g, '<b>$1</b>')
+      // 还原服务端预生成的 <img> 标签（get_md 已把图片语法改写为 HTML，
+      // esc 会转义——此处把转义形态完整还原为可执行标签）
+      .replace(/&lt;(img\\b.*?)&gt;/g, function(all, inner) {
+          return '<' + inner.replace(/&quot;/g, '"') + '>';
+      });
   for (const line of lines) {
     const t = line.trim();
     if (t.startsWith('```')) {
@@ -729,6 +806,9 @@ const PANELS = {
             maxIdx: 0, total: 0, history: [] },
   agents: { label: '批量下载搜索分析Agent',
             inFlight: new Map(), stage: null, stageTs: 0, done: null,
+            maxIdx: 0, total: 0, history: [] },
+  delete: { label: '批量删除剧本',
+            inFlight: new Map(), stage: null, stageTs: 0, done: null,
             maxIdx: 0, total: 0, history: [] }
 };
 let curTool = 'query';          // 当前展示的工具数据源
@@ -762,6 +842,7 @@ function panelFor(source) {
   if (source === 'query') return PANELS.query;
   if (source === 'export' || source === 'search') return PANELS.export;
   if (source === 'agents') return PANELS.agents;
+  if (source === 'delete') return PANELS.delete;
   return null;   // 无来源事件不进入快捷工具面板
 }
 function renderProgressEvent(d) {
@@ -892,7 +973,7 @@ setInterval(renderPanel, 500);
 function quickTool(name) {
   document.querySelectorAll('#quick-list a').forEach(a =>
     a.classList.toggle('active', a.dataset.tool === name));
-  for (const t of ['query', 'search', 'agents']) {
+  for (const t of ['query', 'search', 'agents', 'delete']) {
     document.getElementById('quick-panel-' + t).style.display =
         t === name ? '' : 'none';
   }
@@ -906,7 +987,7 @@ async function loadGroups() {
     const r = await fetch('/api/groups');
     const d = await r.json();
     if (d.error) return;
-    for (const sel of ['q-group', 's-group']) {
+    for (const sel of ['q-group', 's-group', 'd-group']) {
       const el = document.getElementById(sel);
       const cur = el.value;
       el.innerHTML = '<option value="">（全部项目组）</option>' +
@@ -1057,6 +1138,111 @@ async function searchAgents() {
   } catch (e) { idle('a-btn', 'a-msg', '', '请求失败: ' + e); }
 }
 
+/* ---------- 批量删除剧本 ---------- */
+let dSelected = new Set();
+async function loadDeletable() {
+  busy('d-query-btn', 'd-msg', '查询中…');
+  dSelected = new Set();
+  try {
+    const group = document.getElementById('d-group').value;
+    const r = await fetch('/api/quick/deletable_scripts', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({group: group})
+    });
+    const d = await r.json();
+    if (d.error) { idle('d-query-btn', 'd-msg', '', '失败: ' + d.error); return; }
+    renderDeleteTable(d);
+    idle('d-query-btn', 'd-msg',
+        '共 ' + d.total + ' 个可删除剧本（名称以 _由AI修改 结尾）'
+        + (d.total ? '，勾选后点击删除' : '——该范围没有 AI 修改的剧本'));
+  } catch (e) { idle('d-query-btn', 'd-msg', '', '请求失败: ' + e); }
+}
+function renderDeleteTable(d) {
+  const box = document.getElementById('d-result');
+  const cols = d.headers.length;
+  let html = '<table><tr><th style="width:36px"><input type="checkbox" ' +
+      'id="d-check-all" onclick="toggleAllDelete(this)" ' +
+      (dSelected.size && dSelected.size === d.total ? 'checked' : '') +
+      '></th>';
+  html += d.headers.map(h => '<th>' + esc(h) + '</th>').join('') +
+      '<th>删除结果</th></tr>';
+  for (const row of d.rows) {
+    const sid = row[1];
+    html += '<tr><td><input type="checkbox" data-sid="' + esc(sid) +
+        '" onclick="toggleDelete(this)" ' +
+        (dSelected.has(sid) ? 'checked' : '') + '></td>';
+    html += row.map(c => '<td>' + esc(c) + '</td>').join('');
+    html += '<td id="d-cell-' + esc(sid) + '"></td></tr>';
+  }
+  html += '</table>';
+  html += '<div class="table-ops"><button class="primary" ' +
+      'id="d-del-btn" onclick="doDeleteSelected()">删除选中（' +
+      dSelected.size + '）</button>' +
+      '<span id="d-del-msg" class="ok"></span></div>';
+  box.innerHTML = html;
+  box._deleteData = d;
+}
+function toggleDelete(cb) {
+  const sid = cb.dataset.sid;
+  if (cb.checked) dSelected.add(sid); else dSelected.delete(sid);
+  updateDeleteBtn();
+}
+function toggleAllDelete(cb) {
+  const data = document.getElementById('d-result')._deleteData || {};
+  dSelected = cb.checked
+      ? new Set(data.rows.map(r => r[1])) : new Set();
+  document.querySelectorAll('#d-result input[data-sid]').forEach(i =>
+    i.checked = cb.checked);
+  updateDeleteBtn();
+}
+function updateDeleteBtn() {
+  const btn = document.getElementById('d-del-btn');
+  if (btn) btn.textContent = '删除选中（' + dSelected.size + '）';
+}
+async function doDeleteSelected() {
+  if (!dSelected.size) { alert('请先勾选要删除的剧本'); return; }
+  if (!confirm('确认删除选中的 ' + dSelected.size +
+      ' 个剧本？删除不可恢复（仅删除名称以 _由AI修改 结尾的剧本）。'))
+    return;
+  busy('d-del-btn', 'd-del-msg', '删除中…');
+  try {
+    const r = await fetch('/api/quick/delete_scripts', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({script_ids: Array.from(dSelected)})
+    });
+    const d = await r.json();
+    if (d.error) { idle('d-del-btn', 'd-del-msg', '', '失败: ' + d.error); return; }
+    for (const res of d.results || []) {
+      const cell = document.getElementById('d-cell-' + res.script_id);
+      if (cell) cell.innerHTML = res.ok
+          ? '<span style="color:#059669">✓ 已删除</span>'
+          : '<span style="color:#b91c1c" title="' + esc(res.error || res.detail || '') +
+            '">✗ ' + esc(res.error || res.detail || '失败') + '</span>';
+    }
+    idle('d-del-btn', 'd-del-msg',
+        '删除完成：成功 ' + d.deleted + '/' + d.total +
+        (d.failed ? '，失败 ' + d.failed + '（详见表格）' : ''));
+  } catch (e) { idle('d-del-btn', 'd-del-msg', '', '请求失败: ' + e); }
+}
+
+/* ---------- 页面顶部账号 ---------- */
+async function refreshAccount() {
+  const el = document.getElementById('head-account');
+  el.textContent = '获取中…';
+  try {
+    const r = await fetch('/api/account', {method: 'POST'});
+    const d = await r.json();
+    if (d.logged_in) {
+      el.textContent = d.account + (d.username ? '（' + d.username + '）' : '');
+    } else {
+      el.textContent = '未登录';
+      el.title = d.error || '未获取到登录账号，请确认已登录火山引擎控制台';
+    }
+  } catch (e) {
+    el.textContent = '未登录';
+  }
+}
+
 function renderQuickTable(containerId, headers, rows, title) {
   const box = document.getElementById(containerId);
   if (!rows || !rows.length) {
@@ -1130,11 +1316,12 @@ async function exportQuickTable(containerId, title) {
 
 /* ---------- 启动 ---------- */
 (async () => {
-  // 先取配置：账号未配置时显示告警横幅并自动切到「配置参数」标签
+  // 先取配置：修改开关未开启或账号未配置时显示告警横幅并自动切到
+  // 「配置参数」标签（修改类操作会被拒绝）
   try {
     const r = await fetch('/api/config');
     const c = await r.json();
-    if (!c.allowed_account) {
+    if (!c.allowed_account || !c.allow_mutation) {
       document.getElementById('account-alert').style.display = 'block';
       switchTab('config');
     } else {
@@ -1146,6 +1333,7 @@ async function exportQuickTable(containerId, title) {
 })();
 loadConfig();
 loadTools();
+refreshAccount();
 loadGroups();
 loadExportDirs();
 loadAgentsDirs();
@@ -1199,12 +1387,28 @@ def build_web_routes() -> list[Route]:
     async def get_cfg(request: Request) -> Response:
         cfg = global_config.load_config()
         port = global_config.get_server_port()
+        from .autostart import is_autostart_enabled
         return JSONResponse({
             "server_port": port,
+            "allow_mutation": global_config.get_allow_mutation(),
             "allowed_account": cfg.get("allowed_account", ""),
             "sse_url": f"http://127.0.0.1:{port}/sse",
             "config_path": global_config.config_path(),
+            "autostart": is_autostart_enabled(),
         })
+
+    async def post_autostart(request: Request) -> Response:
+        """切换系统自启动（注册表 Run 键，prompt 2026-09-07，默认关闭）。"""
+        try:
+            data = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "请求体非 JSON"}, status_code=400)
+        enabled = bool(data.get("enabled"))
+        from .autostart import set_autostart
+        r = set_autostart(enabled)
+        if r.get("error"):
+            return JSONResponse({"error": r["error"]}, status_code=500)
+        return JSONResponse(r)
 
     async def post_cfg(request: Request) -> Response:
         try:
@@ -1227,11 +1431,15 @@ def build_web_routes() -> list[Route]:
                 return JSONResponse(
                     {"error": "账号应为数字（账号ID）"}, status_code=400)
             cfg["allowed_account"] = account
+        if "allow_mutation" in data:
+            # 修改操作开关（prompt 2026-09-07：默认关闭，只允许人工修改）
+            cfg["allow_mutation"] = bool(data["allow_mutation"])
         if not cfg:
             return JSONResponse({"error": "无有效配置项"}, status_code=400)
         saved = global_config.save_config(cfg)
         return JSONResponse({
             "server_port": saved["server_port"],
+            "allow_mutation": saved["allow_mutation"],
             "allowed_account": saved["allowed_account"],
             "restart_required": True,
             "message": "已保存（端口修改需重启服务生效）",
@@ -1254,8 +1462,35 @@ def build_web_routes() -> list[Route]:
         if not path.is_file():
             return JSONResponse(
                 {"error": f"内容文件不存在: md/{name}.md"}, status_code=404)
-        return JSONResponse({"name": name, "content": path.read_text(
-            encoding="utf-8")})
+        content = path.read_text(encoding="utf-8")
+        # 服务端图片改写（2026-09-07）：md 内 ![alt](pics/xxx.png) /
+        # ![alt](/pics/xxx.png) -> 静态路由 /pics/xxx.png 的 HTML img 标签
+        # （放 md/pics/ 的图片可直接引用；相对路径统一改写为 /pics/…）
+        import re as _re
+        content = _re.sub(
+            r"!\[([^\]]*)\]\(\s*(?:/)?(?:pics/|pics\\)([^)\s]+)\s*\)",
+            r'<img src="/pics/\2" alt="\1" style="max-width:100%">',
+            content)
+        return JSONResponse({"name": name, "content": content})
+
+    async def get_account(request: Request) -> Response:
+        """当前登录火山账号（页面顶部展示；未登录/获取失败=未登录）。"""
+        try:
+            account = await run_in_threadpool(
+                _get_quick_client().get_current_account)
+            username = ""
+            try:
+                user = await run_in_threadpool(
+                    _get_quick_client().get_current_user)
+                username = str(user.get("username") or "")
+            except Exception:  # noqa: BLE001 - 用户名取不到不影响账号展示
+                pass
+            return JSONResponse({"account": str(account),
+                                 "username": username, "logged_in": True})
+        except Exception as e:  # noqa: BLE001 - 未登录/Cookie 服务未运行
+            return JSONResponse({"account": "", "username": "",
+                                 "logged_in": False,
+                                 "error": str(e)[:200]})
 
     return [
         Route("/", page),
@@ -1263,6 +1498,8 @@ def build_web_routes() -> list[Route]:
         Route("/api/config", post_cfg, methods=["POST"]),
         Route("/api/tools", get_tools, methods=["GET"]),
         Route("/api/md", get_md, methods=["GET"]),
+        Route("/api/account", get_account, methods=["POST"]),
+        Route("/api/autostart", post_autostart, methods=["POST"]),
         WebSocketRoute("/ws", progress_ws),
         *build_quick_routes(),
     ]
@@ -1393,15 +1630,16 @@ def search_downloaded_agents(dir_name: str, keyword: str,
     """在「批量下载分析Agent」目录的提示词 md 文件中按行搜索关键字。"""
     import json as _json
     import time as _time
-    from .result import AGENTS_DIR_SUFFIX, RESULT_DIR
+    from .result import AGENTS_DIR_SUFFIX, find_result_dir
     progress.set_source("agents")
     start = _time.perf_counter()
     rows_out: list = []
     hits = 0
     try:
-        target = RESULT_DIR / dir_name if dir_name else None
-        if not target or not target.is_dir() or \
-                not target.name.endswith(AGENTS_DIR_SUFFIX):
+        # 目录解析兼容新旧结构（result/{日期}/{目录名} 与 result/{目录名}，
+        # 2026-09-08 修复：此前 RESULT_DIR/name 只命中旧结构）
+        target = find_result_dir(dir_name)
+        if not target or not target.name.endswith(AGENTS_DIR_SUFFIX):
             return {"error": "下载目录不存在（先执行第 1 步批量下载）"}
         mf = target / "清单.json"
         manifest = {}
@@ -1436,6 +1674,101 @@ def search_downloaded_agents(dir_name: str, keyword: str,
         progress.report_done(
             f"分析Agent搜索完成：命中 {hits}/{len(rows_out)} 个",
             elapsed_s=elapsed_s, total=len(rows_out), hits=hits)
+        progress.set_source("")
+
+
+# ---------------------------------------------------------------- 批量删除剧本（prompt 2026-09-07 快捷工具四）
+
+DELETE_SUFFIX = "_由AI修改"
+
+
+def list_deletable_scripts(group: str = "") -> dict:
+    """查询项目组下名称以 _由AI修改 结尾的剧本（供批量删除选择）。
+
+    展示字段：剧本ID/剧本名称/剧本类型/测试版本号/更新时间；
+    其余剧本（不带后缀）不展示（prompt：仅展示可删除的 AI 修改剧本）。
+    """
+    import time as _time
+    progress.set_source("delete")
+    start = _time.perf_counter()
+    try:
+        from .client import agent_mode_name, has_ai_modified_suffix
+        client = _get_quick_client()
+        groups = client.query_project_groups()
+        if group:
+            selected = [g for g in groups if g.get("group_name") == group]
+            if not selected:
+                return {"error": f"项目组不存在: {group}"}
+        else:
+            selected = groups
+        rows: list = []
+        for g in selected:
+            gname = g.get("group_name") or str(g.get("id"))
+            progress.report_stage(
+                f"查询项目组下的剧本 {gname}", group=gname)
+            for s in client.list_group_all_scripts(g["id"]):
+                name = s.get("AgentName") or ""
+                if not has_ai_modified_suffix(name):
+                    continue
+                rows.append([gname, s.get("AgentID") or "", name,
+                             agent_mode_name(s.get("AgentMode")),
+                             s.get("PreviewVersion") or 0,
+                             _ts_text(s.get("UpdateTime"))])
+        return {"headers": ["项目组", "剧本ID", "剧本名称", "剧本类型",
+                            "测试版本号", "更新时间"],
+                "rows": rows, "total": len(rows)}
+    finally:
+        progress.set_source("")
+
+
+def _ts_text(ts) -> str:
+    """毫秒时间戳 -> 'YYYY-MM-DD HH:MM:SS'。"""
+    if not ts:
+        return ""
+    import datetime
+    try:
+        return datetime.datetime.fromtimestamp(int(ts) / 1000).strftime(
+            "%Y-%m-%d %H:%M:%S")
+    except (ValueError, OSError, OverflowError):
+        return str(ts)
+
+
+def batch_delete_scripts(script_ids: list[str]) -> dict:
+    """批量删除剧本（逐个调 client.delete_script，双重后缀校验）。"""
+    import time as _time
+    progress.set_source("delete")
+    start = _time.perf_counter()
+    results: list = []
+    deleted = failed = 0
+    try:
+        client = _get_quick_client()
+        for i, sid in enumerate(script_ids, 1):
+            progress.report_stage(
+                f"删除剧本 {sid}", script_id=sid, index=i,
+                total=len(script_ids))
+            try:
+                r = client.delete_script(sid)
+                ok = bool(r.get("deleted"))
+                if ok:
+                    deleted += 1
+                results.append({"script_id": sid,
+                                "script_name": r.get("script_name"),
+                                "ok": ok,
+                                "detail": "" if ok
+                                else f"回查仍存在 remain={r.get('remain_count')}"})
+            except Exception as e:  # noqa: BLE001 - 单个失败不中断
+                failed += 1
+                results.append({"script_id": sid, "ok": False,
+                                "error": str(e)[:200]})
+        return {"total": len(script_ids), "deleted": deleted,
+                "failed": failed, "results": results}
+    finally:
+        elapsed_s = round(_time.perf_counter() - start, 1)
+        summary = f"批量删除完成：成功 {deleted}/{len(script_ids)}"
+        if failed:
+            summary += f"，{failed} 个失败"
+        progress.report_done(summary, elapsed_s=elapsed_s,
+                             total=len(script_ids), deleted=deleted)
         progress.set_source("")
 
 
@@ -1789,13 +2122,21 @@ def build_quick_routes() -> list[Route]:
         return JSONResponse(result)
 
     async def get_export_dirs(request: Request) -> Response:
+        # 目录结构（prompt 2026-09-07）：result/{日期}/{时间_账号_批量导出剧本}
         from .result import EXPORT_DIR_SUFFIX, RESULT_DIR
         dirs = []
         if RESULT_DIR.is_dir():
-            for d in sorted((d for d in RESULT_DIR.iterdir()
-                             if d.is_dir()
-                             and d.name.endswith(EXPORT_DIR_SUFFIX)),
-                            reverse=True):
+            found = []
+            for d in RESULT_DIR.iterdir():
+                if not d.is_dir():
+                    continue
+                if d.name.endswith(EXPORT_DIR_SUFFIX):
+                    found.append(d)
+                elif d.name.isdigit():
+                    found.extend(x for x in d.iterdir()
+                                 if x.is_dir()
+                                 and x.name.endswith(EXPORT_DIR_SUFFIX))
+            for d in sorted(found, reverse=True):
                 count = sum(1 for p in d.iterdir()
                             if p.is_file() and p.suffix == ".json"
                             and p.name != "清单.json")
@@ -1807,12 +2148,14 @@ def build_quick_routes() -> list[Route]:
 
     def _search(dir_name: str, keyword: str, with_count: bool) -> dict:
         import time as _time
-        from .result import RESULT_DIR
+        from .result import find_result_dir
         progress.set_source("search")
         start = _time.perf_counter()
+        rows: list = []      # try 外初始化：finally 引用（2026-09-08 修复
+        hits = 0             # 提前 return 时 UnboundLocalError 吞掉真错误）
         try:
-            target = RESULT_DIR / dir_name if dir_name else None
-            if not target or not target.is_dir():
+            target = find_result_dir(dir_name)
+            if not target:
                 return {"error": "导出目录不存在，先执行第 1 步批量导出"}
             import json as _json
             mf = target / "清单.json"
@@ -1869,7 +2212,6 @@ def build_quick_routes() -> list[Route]:
             result = await run_in_threadpool(
                 _search, dir_name, keyword, with_count)
         except Exception as e:  # noqa: BLE001
-            return JSONResponse({"error": str(e)[:300]}, status_code=500)
             _log_quick_error(e)
             return JSONResponse({"error": str(e)[:300]}, status_code=500)
         return JSONResponse(result)
@@ -1890,19 +2232,26 @@ def build_quick_routes() -> list[Route]:
             result = await run_in_threadpool(
                 batch_download_agents, agent_type, concurrency)
         except Exception as e:  # noqa: BLE001
-            return JSONResponse({"error": str(e)[:300]}, status_code=500)
             _log_quick_error(e)
             return JSONResponse({"error": str(e)[:300]}, status_code=500)
         return JSONResponse(result)
 
     async def get_agents_dirs(request: Request) -> Response:
+        # 目录结构（prompt 2026-09-07）：result/{日期}/{时间_账号_批量下载分析Agent}
         from .result import AGENTS_DIR_SUFFIX, RESULT_DIR
         dirs = []
         if RESULT_DIR.is_dir():
-            for d in sorted((d for d in RESULT_DIR.iterdir()
-                             if d.is_dir()
-                             and d.name.endswith(AGENTS_DIR_SUFFIX)),
-                            reverse=True):
+            found = []
+            for d in RESULT_DIR.iterdir():
+                if not d.is_dir():
+                    continue
+                if d.name.endswith(AGENTS_DIR_SUFFIX):
+                    found.append(d)
+                elif d.name.isdigit():
+                    found.extend(x for x in d.iterdir()
+                                 if x.is_dir()
+                                 and x.name.endswith(AGENTS_DIR_SUFFIX))
+            for d in sorted(found, reverse=True):
                 count = sum(1 for p in d.iterdir()
                             if p.is_file() and p.suffix == ".md")
                 dirs.append({"name": d.name, "count": count})
@@ -1922,7 +2271,36 @@ def build_quick_routes() -> list[Route]:
             result = await run_in_threadpool(
                 search_downloaded_agents, dir_name, keyword, with_count)
         except Exception as e:  # noqa: BLE001
+            _log_quick_error(e)
             return JSONResponse({"error": str(e)[:300]}, status_code=500)
+        return JSONResponse(result)
+
+    # ---------------- 批量删除剧本（prompt 2026-09-07） ----------------
+
+    async def post_list_deletable(request: Request) -> Response:
+        try:
+            data = await request.json()
+        except ValueError:
+            data = {}
+        group = str((data or {}).get("group") or "").strip()
+        try:
+            result = await run_in_threadpool(list_deletable_scripts, group)
+        except Exception as e:  # noqa: BLE001
+            _log_quick_error(e)
+            return JSONResponse({"error": str(e)[:300]}, status_code=500)
+        return JSONResponse(result)
+
+    async def post_delete_scripts(request: Request) -> Response:
+        try:
+            data = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "请求体非 JSON"}, status_code=400)
+        ids = [str(x) for x in data.get("script_ids") or [] if str(x)]
+        if not ids:
+            return JSONResponse({"error": "未选择要删除的剧本"}, status_code=400)
+        try:
+            result = await run_in_threadpool(batch_delete_scripts, ids)
+        except Exception as e:  # noqa: BLE001
             _log_quick_error(e)
             return JSONResponse({"error": str(e)[:300]}, status_code=500)
         return JSONResponse(result)
@@ -1965,12 +2343,24 @@ def build_quick_routes() -> list[Route]:
         Route("/api/quick/agents_dirs", get_agents_dirs, methods=["GET"]),
         Route("/api/quick/search_agents", post_search_agents,
               methods=["POST"]),
+        Route("/api/quick/deletable_scripts", post_list_deletable,
+              methods=["POST"]),
+        Route("/api/quick/delete_scripts", post_delete_scripts,
+              methods=["POST"]),
         Route("/api/quick/export_xlsx", post_export_xlsx, methods=["POST"]),
     ]
 
 
 def build_app(sse_starlette_app, host: str) -> Starlette:
-    """主应用：Web 页面路由 + MCP SSE 应用（同端口）。"""
+    """主应用：Web 页面路由 + 静态资源（pics/ 架构图）+ MCP SSE（同端口）。"""
+    from starlette.staticfiles import StaticFiles
+    pics_dir = MD_DIR / "pics"   # 图片放 md/pics/（随 md 内容一起管理）
+    if pics_dir.is_dir():
+        return Starlette(routes=[
+            *build_web_routes(),
+            Mount("/pics", app=StaticFiles(directory=str(pics_dir))),
+            Mount("/", app=sse_starlette_app),
+        ])
     return Starlette(routes=[
         *build_web_routes(),
         Mount("/", app=sse_starlette_app),

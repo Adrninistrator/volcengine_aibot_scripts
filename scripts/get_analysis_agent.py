@@ -15,7 +15,7 @@
 用法：
     python scripts/get_analysis_agent.py BDE44205003
 
-结果文件：result/{时间_账号_获取分析Agent内容}/{AgentID}.json + {AgentID}.md
+结果文件：result/{日期}/{时间_账号_获取分析Agent内容}/{AgentID}.json + {AgentID}.md
 """
 
 from __future__ import annotations
