@@ -504,6 +504,23 @@ class VolcAIBotClient:
                 break
             assert resp is not None
             if resp.status_code != 200:
+                if resp.status_code in (401, 403):
+                    # 面向非技术用户：登录失效场景给出排查指引
+                    # （与 docs/使用说明.md 常见问题一致）
+                    raise ApiError(
+                        f"{what or '请求'}失败：火山引擎返回未登录/登录已"
+                        f"失效（HTTP {resp.status_code}），无法获取登录态。\n"
+                        "请依次检查：\n"
+                        "1. 日常 Chrome 是否已登录火山引擎智能外呼控制台"
+                        "（https://console.volcengine.com/aibot），"
+                        "登录过期时请重新登录；\n"
+                        "2. chrome_capture_operate 服务是否正在正常运行"
+                        "（默认 http://127.0.0.1:33445，可用浏览器访问"
+                        "该地址确认）；\n"
+                        "3. Chrome 插件的 Cookie 推送范围是否允许"
+                        " volcengine.com。\n"
+                        f"[技术详情] {method} {url} HTTP "
+                        f"{resp.status_code}: {resp.text[:300]}")
                 raise ApiError(f"{method} {url} HTTP {resp.status_code}: "
                                f"{resp.text[:300]}")
             return resp

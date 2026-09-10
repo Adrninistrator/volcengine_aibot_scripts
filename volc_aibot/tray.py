@@ -209,7 +209,7 @@ def _run_tray_loop(page_url: str) -> None:
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
     nid.uCallbackMessage = WM_TRAYICON
     nid.hIcon = _icon
-    nid.szTip = "火山引擎智能外呼工具（双击打开配置页）"
+    nid.szTip = "AI外呼机器人智能分析工具（火山引擎）-双击打开配置页"
     _add_tray(hWnd, nid)
 
     msg = wt.MSG()

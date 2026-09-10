@@ -41,13 +41,23 @@ def query_cookies(target_url: str, api_base: str = DEFAULT_COOKIE_API,
             err = r.json().get("error") or r.text[:200]
         except ValueError:
             err = r.text[:200]
-        raise RuntimeError(f"获取 Cookie 失败（HTTP {r.status_code}）: {err}")
+        raise RuntimeError(
+            f"获取 Cookie 失败（HTTP {r.status_code}）: {err}\n"
+            "请检查：Chrome 是否已登录火山引擎控制台（插件会把登录 "
+            "Cookie 推送给 chrome_capture_operate）、插件 Cookie 推送"
+            f"范围是否允许 volcengine.com、chrome_capture_operate 服务"
+            f"是否正在运行（默认 {api_base}）。")
     try:
         data = r.json()
     except ValueError:
         raise RuntimeError(f"Cookie 接口返回非 JSON: {r.text[:200]}")
     if not data.get("ok"):
-        raise RuntimeError(f"获取 Cookie 失败: {data.get('error')}")
+        raise RuntimeError(
+            f"获取 Cookie 失败: {data.get('error')}\n"
+            "请检查：Chrome 是否已登录火山引擎控制台（插件会把登录 "
+            "Cookie 推送给 chrome_capture_operate）、插件 Cookie 推送"
+            f"范围是否允许 volcengine.com、chrome_capture_operate 服务"
+            f"是否正在运行（默认 {api_base}）。")
     return data.get("cookies") or [], data.get("cookie_header") or ""
 
 

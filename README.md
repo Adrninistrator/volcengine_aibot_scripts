@@ -12,6 +12,8 @@ volcengine_aibot_scripts/
 │  ├─ client.py                 # 控制台 API 客户端（全部接口封装+账号守卫）
 │  ├─ cookie_client.py          # chrome_capture_operate Cookie 查询客户端
 │  ├─ global_config.py          # 全局配置（~/.volcengine_aibot_scripts/global.json）
+│  ├─ web/                      # 页面独立文件（2026-09-10 从 web_server.py 拆出）
+│  │  └─ index.html             # 整页 HTML（含内联样式与脚本，改后刷新即生效）
 │  ├─ web_server.py             # Web 配置页（与 MCP SSE 同端口）
 │  ├─ tray.py                   # 系统托盘（双击开页面/右键退出，无窗口运行）
 │  ├─ config.py                 # 常量（基址/产品线/变量类型表）
