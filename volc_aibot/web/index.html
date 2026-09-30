@@ -394,6 +394,8 @@ header .logo .logo-sub { font-size: 15px; }
       端口使用当前全局配置（改端口无需重新设置自启动）。
     </div>
 
+    <div id="autostart-migrate" class="alert" style="display:none"></div>
+
     <button class="primary" onclick="save()">保存</button>
     <span id="msg" class="ok"></span>
 
@@ -465,6 +467,19 @@ async function loadConfig() {
   document.getElementById('account').value = c.allowed_account;
   document.getElementById('allowMutation').checked = !!c.allow_mutation;
   document.getElementById('autostart').checked = !!c.autostart;
+  // 自启动指向其他目录（项目拷贝/迁移未跟随）时提示迁移
+  const mig = document.getElementById('autostart-migrate');
+  if (!c.autostart && (c.autostart_other || []).length) {
+    mig.style.display = 'block';
+    mig.innerHTML = '⚠ <b>检测到自启动项指向其他目录</b>：' +
+        (c.autostart_other || []).map(x =>
+          '<code class="url">' + esc(x.command) + '</code>').join('<br>') +
+        '。<br>若项目已拷贝或移动到当前目录使用，勾选上方「系统自启动」并' +
+        '保^即可迁移到当前目录，旧目录的注册表项会自动清理（避免开机时' +
+        '两份服务抢占端口）。';
+  } else {
+    mig.style.display = 'none';
+  }
   document.getElementById('headStatus').textContent =
       '端口 ' + c.server_port + ' · 修改操作' +
       (c.allow_mutation ? '已允许' : '已禁止') + ' · ' +

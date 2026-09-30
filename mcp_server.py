@@ -25,6 +25,8 @@
 同端口服务（prompt 新要求）：
 - HTTP 配置页 http://127.0.0.1:{port}/（监听端口、是否允许执行修改操作开关
   与允许账号，写全局配置 ~/.volcengine_aibot_scripts/global.json）；
+- 系统自启动 HTTP 接口（prompt 2026-09-22）：GET/POST /api/autostart
+  （AI 可 curl 查询/设置，见 usage_guide quickstart）；
 - MCP SSE 端点 http://127.0.0.1:{port}/sse；
 - 系统托盘（双击打开配置页，右键退出）；pythonw 运行无窗口。
 
@@ -175,6 +177,18 @@ _USAGE_GUIDE = {
 2. say_to_robot(session_id, text) 循环多轮（每轮检查 session_completed，
    true 表示机器人已挂机，停止发言）
 3. end_dialog(session_id) → 意向评级 + 对话摘要（结果写入 result 目录）
+
+**服务配置 HTTP 接口（AI 可直接 curl 调用，prompt 2026-09-22）**
+- 服务端口：读全局配置 ~/.volcengine_aibot_scripts/global.json 的
+  server_port（默认 19000；GET /api/config 亦可查询）；
+- 查询系统自启动：GET http://127.0.0.1:{端口}/api/autostart
+  → {autostart（是否已开启）, command（自启动命令行）, reg_name,
+  other_entries（其他目录残留项）}；
+- 设置系统自启动：POST http://127.0.0.1:{端口}/api/autostart，
+  请求体 {"enabled": true} 开启 / {"enabled": false} 关闭（写/删注册表
+  HKCU Run 键，与配置页勾选「系统自启动」等效）；
+- 注意：监听端口、修改操作开关、允许账号等参数仅人工在配置页修改，
+  AI 勿经 HTTP 修改（prompt 约定，以免用错环境）。
 
 其他主题：usage_guide("scripts") / ("variables") / ("import_export")
 / ("publish") / ("agents_info") / ("faq")，或 "all" 查看全部。"""

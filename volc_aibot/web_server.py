@@ -12,6 +12,9 @@
     GET  /               页面（HTML）
     GET  /api/config     读取全局配置
     POST /api/config     保存配置（端口 / 修改操作开关 / 允许账号）
+    GET  /api/autostart  查询系统自启动状态（prompt 2026-09-22）
+    POST /api/autostart  设置系统自启动（prompt 2026-09-22：HTTP 接口
+                         供 AI 查询/设置，如 curl POST {"enabled": true}）
     GET  /api/tools      MCP 工具清单（名称/描述/参数）
     GET  /api/md?name=x  读取 md 目录下的 md 文件内容
 """
@@ -140,7 +143,7 @@ def build_web_routes() -> list[Route]:
     async def get_cfg(request: Request) -> Response:
         cfg = global_config.load_config()
         port = global_config.get_server_port()
-        from .autostart import is_autostart_enabled
+        from .autostart import is_autostart_enabled, other_autostart_entries
         return JSONResponse({
             "server_port": port,
             "allow_mutation": global_config.get_allow_mutation(),
@@ -148,10 +151,27 @@ def build_web_routes() -> list[Route]:
             "sse_url": f"http://127.0.0.1:{port}/sse",
             "config_path": global_config.config_path(),
             "autostart": is_autostart_enabled(),
+            # 其他目录残留的自启动项（项目拷贝/迁移未跟随），页面提示迁移
+            "autostart_other": other_autostart_entries(),
         })
 
+    async def get_autostart(request: Request) -> Response:
+        """查询系统自启动状态（prompt 2026-09-22：HTTP 接口供 AI 查询）。
+
+        返回 {autostart, command, reg_name, other_entries}，与 GET
+        /api/config 中 autostart 字段一致但更完整（含自启动命令与
+        其他目录残留项）；供 AI 在设置前先查询当前状态。
+        """
+        from .autostart import autostart_status
+        return JSONResponse(autostart_status())
+
     async def post_autostart(request: Request) -> Response:
-        """切换系统自启动（注册表 Run 键，prompt 2026-09-07，默认关闭）。"""
+        """设置系统自启动（注册表 Run 键，默认关闭）。
+
+        prompt 2026-09-22：配置参数提供 HTTP 接口以便 AI 能够设置系统
+        自启动——请求体 {"enabled": true/false}（AI 可经 curl 调用，
+        端口见全局配置 server_port；配置页保存按钮走同一接口）。
+        """
         try:
             data = await request.json()
         except ValueError:
@@ -252,6 +272,7 @@ def build_web_routes() -> list[Route]:
         Route("/api/tools", get_tools, methods=["GET"]),
         Route("/api/md", get_md, methods=["GET"]),
         Route("/api/account", get_account, methods=["POST"]),
+        Route("/api/autostart", get_autostart, methods=["GET"]),
         Route("/api/autostart", post_autostart, methods=["POST"]),
         WebSocketRoute("/ws", progress_ws),
         *build_quick_routes(),

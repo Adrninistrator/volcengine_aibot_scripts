@@ -54,6 +54,10 @@ volcengine_aibot_scripts/
 
 非技术人员部署：电脑上未安装 Git、Python 时，将 `md/非技术人员AI协助部署指南.md` 的**文件路径**发给 AI（如 Claude Code）即可，AI 可自行读取该文档并按其协助完成部署，无需复制全文。文档包含已实测验证的下载地址与国内镜像（Python 安装包、项目 ZIP、pip 依赖）、AI 可自动完成与必须人工完成的步骤划分（人工仅 3 项：安装 Chrome 插件、配置 Cookie 推送范围、登录火山引擎控制台）。
 
+## AI 完成安装
+
+见[提供给AI的安装说明](提供给AI的安装说明.md)
+
 ## 快速开始
 
 ### 1. 安装依赖
@@ -93,6 +97,7 @@ start.bat 19001                        # 本次覆盖端口
 - 全局配置文件：`C:\Users\<用户名>\.volcengine_aibot_scripts\global.json`；
 - **修改守卫**：修改类操作执行前先检查「**是否允许执行修改操作**」开关（默认关闭，未开启一律拒绝），再校验当前 Chrome 登录账号（/console/api/v2/user
  的 id）是否为允许账号，不一致拒绝执行；同一 Cookie 未变化时免重复检查；开关未开启或账号未配置时报错并提示到配置页设置（可用 `scripts\get_current_user.py --save-allowed` 直接写入当前账号）。
+- **系统自启动（默认不开启）**：在配置页「配置参数」勾选保存即可；也提供 HTTP 接口供 AI 查询/设置——`GET /api/autostart` 查状态、`POST /api/autostart` 传 `{"enabled": true/false}`（如 `curl -X POST http://127.0.0.1:19000/api/autostart -H "Content-Type: application/json" -d "{\"enabled\": true}"`）。通过 Windows 注册表（当前用户 Run 键）配置，开启后开机自动以 pythonw 后台运行本服务（无窗口，托盘可见），端口跟随全局配置。
 
 ### 5. 安装 MCP 服务到 Claude Code
 
