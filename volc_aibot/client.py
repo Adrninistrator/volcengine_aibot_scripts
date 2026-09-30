@@ -350,11 +350,12 @@ class VolcAIBotClient:
     def _open_config_page(self) -> None:
         """未配置允许账号时弹出网页配置页（自动打开浏览器）。
 
-        - Web 服务在运行（端口可连通）-> webbrowser 打开配置页；
+        - Web 服务在运行（端口可连通）-> 打开配置页（Chrome 优先，未安装
+          回退默认浏览器——prompt 2026-09-30）；
         - 服务未运行 -> 提示用户先启动服务（start.bat）再从托盘打开；
         - 同一进程只弹一次（后续仅文字提示），失败不影响异常抛出。
         """
-        import webbrowser
+        from .browser import open_url_in_chrome
         if VolcAIBotClient._config_page_opened:
             return
         VolcAIBotClient._config_page_opened = True
@@ -369,8 +370,7 @@ class VolcAIBotClient:
             service_running = False
         if service_running:
             try:
-                webbrowser.open(url)
-                self.logger.info("已自动打开配置页: %s", url)
+                open_url_in_chrome(url)
             except Exception as e:  # noqa: BLE001 - 弹页失败不影响报错
                 self.logger.warning("自动打开配置页失败(%s)，请手动访问 %s",
                                     e, url)

@@ -3,7 +3,8 @@
 
 实现：Windows 原生 Shell_NotifyIcon + ctypes（不引入 pystray 等额外依赖）。
 - 托盘图标：使用程序内生成的小位图（蓝色方块 + "V"），无外部资源文件；
-- 双击：打开配置页（webbrowser）；
+- 双击：打开配置页（Chrome 优先，未安装回退默认浏览器——prompt
+  2026-09-30，见 browser.py）；
 - 右键菜单：「打开配置页」「退出」（退出结束整个进程）。
 
 失败不致命：托盘创建失败时仅记日志（服务仍可用，stdout 模式可见）。
@@ -15,7 +16,8 @@ import ctypes
 import ctypes.wintypes as wt
 import logging
 import threading
-import webbrowser
+
+from .browser import open_url_in_chrome
 
 logger = logging.getLogger("volc_aibot")
 
@@ -157,14 +159,14 @@ def _run_tray_loop(page_url: str) -> None:
     def wnd_proc(hWnd, msg, wParam, lParam):
         if msg == WM_TRAYICON:
             if lParam == WM_LBUTTONDBLCLK:
-                webbrowser.open(page_url)
+                open_url_in_chrome(page_url)
             elif lParam == WM_RBUTTONUP:
                 _popup_menu(hWnd)
             return 0
         if msg == WM_COMMAND:
             cmd = wParam & 0xFFFF
             if cmd == _IDM_OPEN:
-                webbrowser.open(page_url)
+                open_url_in_chrome(page_url)
             elif cmd == _IDM_EXIT:
                 _user32.DestroyWindow(hWnd)
             return 0
