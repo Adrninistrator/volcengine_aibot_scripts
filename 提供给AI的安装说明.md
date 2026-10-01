@@ -8,7 +8,7 @@
 
 # 安装前置处理（必须先完成）
 
-本项目依赖 chrome_capture_operate（向本项目提供火山引擎网站登录 Cookie），先按其在线安装说明完成安装（含 Python、Chrome、Chrome 插件、Cookie 推送服务）：
+本项目依赖 chrome_capture_operate（向本项目提供火山引擎网站登录 Cookie），先按其在线安装说明完成安装：
 
 - https://raw.giteeusercontent.com/adrninistrator/chrome_capture_operate/raw/master/提供给AI的安装说明.md
 （国内优先，实测下载速度明显更快）
@@ -17,11 +17,24 @@
 
 （若本机已存在 chrome_capture_operate 项目，直接读其根目录下的本地副本即可，无需下载。）
 
+按其文档安装时注意以下口径：
+
+- **使用「执行脚本模式」**：本项目只需要其 Cookie 推送能力，不需要抓包与脚本生成——无需安装 nodejs、chrome-devtools-mcp，也不做其 MCP 配置；
+- **Chrome 插件必须安装**（按其文档的插件安装步骤完成，并按本文档「安装步骤 3」配置推送范围）；
+- **安装完成后将其设置为开机自启动**：
+
+```
+curl -X PUT http://127.0.0.1:33445/api/config -H "Content-Type: application/json" -d "{\"auto_start\": true}"
+```
+
+（返回 `ok` 即生效；也可按其 Web 页面/文档的自启动配置方式完成。）
+
 前置处理的成功判定（全部满足才可继续本文档后续步骤）：
 
 1. `curl http://127.0.0.1:33445/health` 返回 `{"ok": true, ...}`；
 2. Chrome 插件已推送 Cookie：`curl http://127.0.0.1:33445/api/cookies/receives` 返回的最近推送记录数量大于 0 且成功；
-3. 日常使用的 Chrome 已登录火山引擎智能外呼控制台（https://console.volcengine.com/aibot）。
+3. 开机自启动已开启：`curl http://127.0.0.1:33445/api/config` 返回的 `auto_start` 为 `true`；
+4. 日常使用的 Chrome 已登录火山引擎智能外呼控制台（https://console.volcengine.com/aibot）。
 
 注意：本文档结构沿用参考文档，其中公共依赖步骤（Python/Chrome/插件/Cookie 服务）已由前置处理完成——环境检查通过即直接跳过，不重复展开。
 
@@ -168,16 +181,17 @@ claude mcp add --scope user --transport sse volc-aibot http://127.0.0.1:19000/ss
 
 （注意：参考文档中 chrome_capture_operate 的 MCP 由用户自行配置、不执行注册命令；本项目不同，volc-aibot 必须注册后 AI 才能调用其 28 个工具。）
 
-## 6. 系统自启动（可选）
+## 6. 系统自启动（必须设置）
 
-默认不开启。开启后开机自动以 pythonw 后台运行本服务（无窗口，系统托盘可见），端口跟随全局配置。AI 可经 HTTP 接口查询与设置：
+本项目需设置为开机自启动（默认不开启；开启后开机自动以 pythonw 后台运行本服务，无窗口，系统托盘可见，端口跟随全局配置）。AI 经 HTTP 接口设置：
 
 ```
-curl http://127.0.0.1:19000/api/autostart
 curl -X POST http://127.0.0.1:19000/api/autostart -H "Content-Type: application/json" -d "{\"enabled\": true}"
 ```
 
-（关闭传 `"enabled": false`；与配置页勾选「系统自启动」等效。注意项目目录拷贝/移动后自启动不会跟随，需在新目录重新开启，旧目录残留项会自动清理。）
+查询状态：`curl http://127.0.0.1:19000/api/autostart`（关闭传 `"enabled": false`；与配置页勾选「系统自启动」等效。注意项目目录拷贝/移动后自启动不会跟随，需在新目录重新开启，旧目录残留项会自动清理）。
+
+成功判定：`curl http://127.0.0.1:19000/api/autostart` 返回的 `autostart` 为 `true`。
 
 # 验证
 
@@ -187,6 +201,7 @@ curl -X POST http://127.0.0.1:19000/api/autostart -H "Content-Type: application/
 2. **Cookie 链路**：`curl http://127.0.0.1:33445/api/cookies/receives` 返回的最近推送记录数量大于 0 且成功（若为空，提示用户在插件「参数配置」标签页点击**立即推送一次**，或等待自动推送）；
 3. **修改守卫已配置**：`curl http://127.0.0.1:19000/api/config` 返回的 `allow_mutation` 为 `true` 且 `allowed_account` 非空（对应人工步骤 4）；
 4. **MCP 已注册**：Claude Code 执行 `claude mcp list` 应列出 volc-aibot；其他 Agent 按各自方式确认 MCP 配置生效；
-5. **整条链路**：在 Claude Code 中用自然语言发起一次只读调用，例如「使用 volc-aibot MCP：先调用 usage_guide 工具了解怎么用，然后查询全部项目组」，能返回项目组列表即链路通畅（对话测试类调用会占用生产实际外呼资源，验证链路请勿使用）。
+5. **开机自启动**：`curl http://127.0.0.1:33445/api/config` 返回 `auto_start` 为 `true`（chrome_capture_operate），且 `curl http://127.0.0.1:19000/api/autostart` 返回 `autostart` 为 `true`（本项目）；
+6. **整条链路**：在 Claude Code 中用自然语言发起一次只读调用，例如「使用 volc-aibot MCP：先调用 usage_guide 工具了解怎么用，然后查询全部项目组」，能返回项目组列表即链路通畅（对话测试类调用会占用生产实际外呼资源，验证链路请勿使用）。
 
 验证全部通过后，安装完成。使用方式见项目 README.md 与配置页「使用说明」「适用场景」「提示词示例」标签页。
