@@ -157,30 +157,39 @@ def _run_tray_loop(page_url: str) -> None:
             ("lpszMenuName", wt.LPCWSTR), ("lpszClassName", wt.LPCWSTR)]
 
     def wnd_proc(hWnd, msg, wParam, lParam):
-        if msg == WM_TRAYICON:
-            if lParam == WM_LBUTTONDBLCLK:
-                open_url_in_chrome(page_url)
-            elif lParam == WM_RBUTTONUP:
-                _popup_menu(hWnd)
-            return 0
-        if msg == WM_COMMAND:
-            cmd = wParam & 0xFFFF
-            if cmd == _IDM_OPEN:
-                open_url_in_chrome(page_url)
-            elif cmd == _IDM_EXIT:
-                _user32.DestroyWindow(hWnd)
-            return 0
-        if msg == WM_TASKBARCREATED:
-            _add_tray(hWnd, nid)
-            return 0
-        if msg == WM_DESTROY:
-            nid = NOTIFYICONDATAW()
-            nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
-            nid.hWnd = hWnd
-            nid.uID = 1
-            _shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
-            _user32.PostQuitMessage(0)
-            return 0
+        # ⚠ 回调内任何赋值都会使该名成为 wnd_proc 局部变量（遮蔽外层
+        # 闭包）——WM_DESTROY 分支曾用 nid= 赋值导致 WM_TASKBARCREATED
+        # 分支读到未绑定局部变量（UnboundLocalError，2026-10-13 修复：
+        # 销毁分支改用 nid_del，任务栏重建分支读取外层 nid 闭包）
+        try:
+            if msg == WM_TRAYICON:
+                if lParam == WM_LBUTTONDBLCLK:
+                    open_url_in_chrome(page_url)
+                elif lParam == WM_RBUTTONUP:
+                    _popup_menu(hWnd)
+                return 0
+            if msg == WM_COMMAND:
+                cmd = wParam & 0xFFFF
+                if cmd == _IDM_OPEN:
+                    open_url_in_chrome(page_url)
+                elif cmd == _IDM_EXIT:
+                    _user32.DestroyWindow(hWnd)
+                return 0
+            if msg == WM_TASKBARCREATED:
+                # 任务栏重建（explorer 重启等）：重新添加托盘图标
+                _add_tray(hWnd, nid)
+                return 0
+            if msg == WM_DESTROY:
+                nid_del = NOTIFYICONDATAW()
+                nid_del.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+                nid_del.hWnd = hWnd
+                nid_del.uID = 1
+                _shell32.Shell_NotifyIconW(NIM_DELETE,
+                                           ctypes.byref(nid_del))
+                _user32.PostQuitMessage(0)
+                return 0
+        except Exception:  # noqa: BLE001 - ctypes 回调异常只打印不冒泡
+            logger.exception("托盘消息处理异常（消息 %s）", msg)
         return _user32.DefWindowProcW(hWnd, msg, wParam, lParam)
 
     wnd_proc_c = ctypes.WINFUNCTYPE(

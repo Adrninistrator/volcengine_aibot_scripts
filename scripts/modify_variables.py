@@ -4,28 +4,49 @@
 
 接口：POST .../services/{s}/llm/global_variables?group_id={g}
 body {"Variables":{"delete":[变量ID...],"add":[{...}],"update":[...全量回传]}}
-- 新增：add 元素不带 id（name/key/IsRequired/VariableType 四字段）
+- 新增：add 元素不带 id（name/key/IsRequired/VariableType 等字段）
 - 修改：必须带数字变量ID（先查询获得），存量变量全量回传到 update
 - 删除：delete 传变量数字ID数组（不是调用名称）
 注意：POST 响应为空 Result，成功以回查 GET 为准。
 
-⚠ 变量修改后，需要发布剧本测试版本才能生效（prompt 约定）。
-   加 --publish 可在修改成功后自动发布（描述自动生成）。
+⚠ 前置传入（IsPreset）与是否必填（IsRequired）联动（2026-10-10 晚
+  控制台新增"前置传入"列后直连实测）：
+  - IsPreset=false 时必填恒为 false：服务端对 IsRequired=true 且
+    IsPreset=false 的载荷不报错但**静默置回 false**（add/update 均如此）；
+  - 客户端已内置联动：--required true 自动置前置传入=true；
+    --preset false 自动联动置必填=false（镜像控制台 UI 行为）。
+
+⚠ 变量描述（--description，2026-10-10 晚控制台新增"变量描述"列）：
+  传空串 "" 表示清除描述（服务端空串清除，null/省略为 no-op）。
+
+⚠ 修改变量与发布是两个独立操作（prompt 约定）：变量修改需发布测试
+   版本才生效，但**修改后不要为了生效自动发布**——仅在明确需要发布时
+   才发布（加 --publish 或运行 publish_preview.py；未发布时修改保留为
+   草稿，不影响已发布版本的对话与赋值，何时发布由使用者决定）。
+⚠ 掩码的运行效果只能经通话测试（真实拨打电话）后在通话明细中查询
+   验证——文本对话测试不产生通话明细记录，查不到掩码效果。
 
 流程：查询当前变量 -> 修改前值写入结果文件(before.md) -> 提交 ->
 回查验证 -> 修改后值写入结果文件(after.md)。
 
 before/after 为 md 文件，\t 分隔各列，列含：名称、调用名称、
-是否必填、变量类型数值、变量类型（字符串形式），如：
-    座席工号\tagent_id\t是\t1\tString
+前置传入、是否必填、变量类型数值、变量类型（字符串形式）、
+是否掩码并替换、掩码替换文本、变量描述，如：
+    座席工号\tagent_id\t是\t是\t1\tString\t是\t测试掩码文本\t描述
 
 变量类型：1=String 2=Integer 3=Float 4=Boolean
 
 用法：
     python scripts/modify_variables.py llm_xxx --op add \
         --key test_vvv --name "测试变量" --type 1 --required true
+    （--required true 自动联动前置传入=true，必填可生效）
     python scripts/modify_variables.py llm_xxx --op update \
         --key test_vvv --required false --type 2
+    python scripts/modify_variables.py llm_xxx --op update \
+        --key test_vvv --preset false
+    （关前置传入会联动置必填=false）
+    python scripts/modify_variables.py llm_xxx --op update \
+        --key test_vvv --description "外呼前传入的客户等级"
     python scripts/modify_variables.py llm_xxx --op delete --key test_vvv
     （加 --publish 修改成功后自动发布测试版本）
 """
@@ -42,14 +63,17 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from volc_aibot.client import VolcAIBotClient          # noqa: E402
+from volc_aibot.client import VolcAIBotClient, mask_text_from_name  # noqa: E402
 from volc_aibot.config import VARIABLE_TYPES           # noqa: E402
 from volc_aibot.logging_util import setup_logging      # noqa: E402
 from volc_aibot.result import new_result_dir, safe_filename, write_variables_md, write_json  # noqa: E402
 
 VARIABLE_COLUMNS = [
-    ("name", "名称"), ("key", "调用名称"), ("IsRequired", "是否必填"),
+    ("name", "名称"), ("key", "调用名称"), ("IsPreset", "前置传入"),
+    ("IsRequired", "是否必填"),
     ("VariableType", "变量类型数值"), ("VariableTypeDesc", "变量类型"),
+    ("IsMasked", "是否掩码并替换"), ("MaskContent", "掩码替换文本"),
+    ("Description", "变量描述"),
 ]
 
 
@@ -87,7 +111,19 @@ def main() -> int:
     ap.add_argument("--type", type=int, choices=[1, 2, 3, 4],
                     help="变量类型：1=String 2=Integer 3=Float 4=Boolean")
     ap.add_argument("--required", type=parse_bool,
-                    help="是否必填：true/false")
+                    help="是否必填：true/false（true 时自动联动前置传入=true，"
+                         "否则服务端静默置必填为否）")
+    ap.add_argument("--preset", type=parse_bool, default=None,
+                    help="前置传入：true/false（false 时自动联动必填=false，"
+                         "二者服务端语义绑定）")
+    ap.add_argument("--description", default=None,
+                    help="变量描述（传空串 \"\" 表示清除描述）")
+    ap.add_argument("--mask", type=parse_bool, default=None,
+                    help="是否掩码并替换：true/false（true 时掩码替换文本固定"
+                         "为该变量的变量名称仅保留中文/字母/数字的结果，"
+                         "不可指定其他值；掩码效果只能经通话测试（真实拨号）"
+                         "后在通话明细中验证，文本对话测试查不到；"
+                         "仅 update 支持）")
     ap.add_argument("--publish", action="store_true",
                     help="修改成功后自动发布剧本测试版本（使其生效）")
     ap.add_argument("--publish-description", default=None,
@@ -103,10 +139,21 @@ def main() -> int:
         if not KEY_PATTERN.fullmatch(args.key):
             ap.error("变量调用名称只支持英文与下划线（如 test_vvv）")
     if args.op == "update":
-        if args.name is None and args.type is None and args.required is None:
-            ap.error("--op update 至少需要 --name / --type / --required 之一")
+        if (args.name is None and args.type is None and args.required is None
+                and args.preset is None and args.description is None
+                and args.mask is None):
+            ap.error("--op update 至少需要 --name / --type / --required /"
+                     " --preset / --description / --mask 之一")
+    if args.op == "add" and args.mask is not None:
+        ap.error("--mask 仅支持 --op update（新增变量暂不支持掩码字段）")
+    if (args.op == "add" and args.preset is False and args.required is True):
+        ap.error("--required true 与 --preset false 矛盾（服务端会静默置必填"
+                 "为否）；必填请省略 --preset 或用 --preset true")
     if args.op == "delete" and (args.name or args.type is not None
-                                or args.required is not None):
+                                or args.required is not None
+                                or args.preset is not None
+                                or args.description is not None
+                                or args.mask is not None):
         ap.error("--op delete 只需要 --key")
 
     logger = setup_logging()
@@ -152,29 +199,65 @@ def main() -> int:
                 f"如需变更请用 --op update")
         add = [{"name": args.name, "key": args.key,
                 "IsRequired": bool(args.required), "VariableType": args.type}]
+        if args.preset is not None:
+            add[0]["IsPreset"] = args.preset
+        if args.description:
+            add[0]["Description"] = args.description
         action_desc = (f"新增变量 {args.key}（{args.name}，类型 "
                        f"{VARIABLE_TYPES.get(args.type)}，"
-                       f"必填={bool(args.required)}）")
+                       f"必填={bool(args.required)}，"
+                       f"前置传入={add[0].get('IsPreset', '默认(否)')}）")
     elif args.op == "update":
         if not target:
             raise SystemExit(
                 f"错误：调用名称 {args.key} 不存在，无法修改（可先运行 "
                 f"query_variables.py 查看现有变量）")
-        item = {"id": target["id"], "name": target.get("name"),
-                "key": target.get("key"),
-                "IsRequired": target.get("IsRequired"),
-                "VariableType": target.get("VariableType")}
+        # 只带显式修改的字段（客户端按 GET 全量回传再叠加，未给字段保持原值）
+        item = {"id": target["id"]}
         changes = []
-        if args.name is not None and args.name != item["name"]:
+        if args.name is not None and args.name != target.get("name"):
             item["name"] = args.name
             changes.append(f"name -> {args.name}")
-        if args.type is not None and args.type != item["VariableType"]:
+        if args.type is not None and args.type != target.get("VariableType"):
             item["VariableType"] = args.type
             changes.append(f"VariableType -> {args.type}"
                            f"({VARIABLE_TYPES.get(args.type)})")
-        if args.required is not None and args.required != item["IsRequired"]:
+        if (args.required is not None
+                and args.required != bool(target.get("IsRequired"))):
             item["IsRequired"] = args.required
             changes.append(f"IsRequired -> {args.required}")
+        if args.preset is not None and args.preset != bool(target.get("IsPreset")):
+            item["IsPreset"] = args.preset
+            changes.append(f"IsPreset(前置传入) -> {args.preset}")
+        if args.description is not None:
+            if args.description == "":
+                # 空串=清除（服务端空串清除，null/省略为 no-op）
+                if target.get("Description"):
+                    item["Description"] = ""
+                    changes.append("Description -> (清除)")
+            elif args.description != target.get("Description"):
+                item["Description"] = args.description
+                changes.append(f"Description -> {args.description}")
+        if args.mask is not None:
+            # 掩码文本=变量名称仅保留中文/字母/数字（prompt 2026-10-12；
+            # 原样使用名称时含下划线/括号会被服务端拒绝 code=101）。
+            # 已掩码时重复 --mask true 也会执行（掩码文本统一为清洗后的
+            # 变量名称；prompt 2026-10-12：设置掩码无需先判断当前状态，
+            # 直接执行即可）。
+            # 名称清洗后为空（全特殊字符）：无法生成合法掩码文本，优雅
+            # 报错而非崩溃（2026-10-13 自查修复）
+            try:
+                expected = (mask_text_from_name(target.get("name"))
+                            if args.mask else "")
+            except ValueError as e:
+                raise SystemExit(f"错误：变量 {args.key} 无法设置掩码：{e}")
+            if (args.mask != bool(target.get("IsMasked"))
+                    or (args.mask
+                        and expected != (target.get("MaskContent") or ""))):
+                item["IsMasked"] = args.mask
+                item["MaskContent"] = expected
+                changes.append(f"IsMasked -> {args.mask}"
+                               f"（MaskContent -> {item['MaskContent']!r}）")
         if not changes:
             raise SystemExit("没有任何字段发生变化（新值与当前值相同），未提交")
         update = [item]
@@ -199,6 +282,10 @@ def main() -> int:
     })
 
     after_by_key = {v.get("key"): v for v in after}
+    if result.get("notes"):
+        print("\n联动修正（前置传入/是否必填服务端语义绑定）：")
+        for note in result["notes"]:
+            print(f"  - {note}")
     ok = True
     if args.op == "add":
         ok = args.key in after_by_key
@@ -211,7 +298,13 @@ def main() -> int:
               and (args.name is None or cur.get("name") == args.name)
               and (args.type is None or cur.get("VariableType") == args.type)
               and (args.required is None
-                   or bool(cur.get("IsRequired")) == args.required))
+                   or bool(cur.get("IsRequired")) == args.required)
+              and (args.preset is None
+                   or bool(cur.get("IsPreset")) == args.preset)
+              and (args.description is None
+                   or cur.get("Description", "") == args.description)
+              and (args.mask is None
+                   or bool(cur.get("IsMasked")) == args.mask))
         print(f"\n修改{'成功' if ok else '失败'}：{action_desc}")
     else:
         ok = args.key not in after_by_key
@@ -237,13 +330,19 @@ def main() -> int:
               f"V{pub['new_version']}（FINISHED），变量修改已生效")
         write_json(out_dir / "publish.json", pub)
     else:
-        print("\n提醒：剧本变量修改后，需要发布剧本测试版本才能生效"
-              "（运行 scripts/publish_preview.py，或本次加 --publish）。")
+        print("\n提醒：修改变量与发布是独立操作——修改已保存（未发布时"
+              "保留为草稿，不影响已发布版本）；如需修改生效，由使用者"
+              "决定何时发布（运行 scripts/publish_preview.py，或下次"
+              "修改时加 --publish），不要默认自动发布。")
+    if args.mask:
+        print("提醒：掩码的运行效果只能经通话测试（真实拨打电话，如 "
+              "start_call_test / 控制台通话测试）后在通话明细中查询验证"
+              "——文本对话测试不产生通话明细记录，查不到掩码效果。")
 
     write_json(out_dir / "summary.json", {
         "script_id": args.script_id, "op": args.op,
         "action": action_desc, "success": ok,
-        "payload": result["payload"],
+        "payload": result["payload"], "coupling_notes": result.get("notes"),
     })
     return 0
 

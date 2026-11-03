@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import re
@@ -32,8 +33,8 @@ import urllib3
 from .config import BASE_URL, DEFAULT_COOKIE_API, DEFAULT_TIMEOUT, \
     PERMISSION_RESOURCE, PRODUCT_ID
 from .cookie_client import query_cookies
-from .global_config import (get_allow_mutation, get_allowed_account,
-                            get_server_port)
+from .global_config import (cookie_source_signature, get_allow_mutation,
+                            get_allowed_account, get_server_port)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -58,16 +59,96 @@ LADDER_AGENT_TYPES = {
 
 # 剧本类型（agent/list 的 AgentMode 数值 -> 名称；批量导出清单记录，
 # 批量搜索结果展示「剧本类型」列，prompt 2026-09-06）
+# 2026-10-10 修正（此前 1/2/3 整体错位）：按控制台剧本列表页实测
+# llm_yjzw_bjfhd(AgentMode=1)=对话流程编排、llm_qzdt_gdeec(AgentMode=2)
+# =纯 PE 型、llm_sdzx_ehcgc(AgentMode=3)=Multi Agents
 AGENT_MODE_NAMES = {
-    1: "纯PE型 Agent",
-    2: "Multi Agents",
-    3: "对话流程编排 Agent",
+    1: "对话流程编排 Agent",
+    2: "纯 PE 型 Agent",
+    3: "Multi Agents",
 }
 
 
 def agent_mode_name(mode) -> str:
     """AgentMode 数值 -> 剧本类型名称（未知值返回原值字符串）。"""
     return AGENT_MODE_NAMES.get(mode, str(mode or ""))
+
+
+# ---------------------------------------------------------------- 时间归一化
+# 剧本修改时间（agent/list 的 UpdateTime，ms epoch）与发布时间
+# （release-launch 的 update_time，ISO 8601 带 +08:00）两套口径统一为
+# 本地 naive datetime / "YYYY-MM-DD HH:MM:SS" 文本，供发布判断与展示
+
+def _parse_ms_time(ms) -> "datetime.datetime | None":
+    """毫秒时间戳 -> 本地 naive datetime（无效/空返回 None）。"""
+    import datetime as _dt
+    try:
+        return _dt.datetime.fromtimestamp(int(ms) / 1000)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def _fmt_ms_time(ms) -> str:
+    """毫秒时间戳 -> "YYYY-MM-DD HH:MM:SS"（无效返回空串）。"""
+    dt = _parse_ms_time(ms)
+    return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
+
+
+def _parse_local_time(iso) -> "datetime.datetime | None":
+    """ISO 8601（如 2026-10-11T00:40:10+08:00）-> 本地 naive datetime。
+
+    带时区的先转到本地时区再去 tz，与 _parse_ms_time（本地 naive）同
+    口径可直接比较；无效/空返回 None。
+    """
+    import datetime as _dt
+    try:
+        dt = _dt.datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
+def fmt_launch_time(iso) -> str:
+    """release-launch 的 update_time -> "YYYY-MM-DD HH:MM:SS"（空返回空串）。"""
+    dt = _parse_local_time(iso)
+    return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
+
+
+def _parse_second_time(text) -> "datetime.datetime | None":
+    """"YYYY-MM-DD HH:MM:SS"（call_list 的 CreateDate）-> naive datetime。
+
+    无效/空返回 None（毫秒精度的 ".500000" 尾巴截断后解析）。
+    """
+    s = str(text or "").strip()
+    if "." in s:
+        s = s.split(".", 1)[0]
+    try:
+        return datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+# 掩码替换文本合法字符（服务端约束 Error.Code=101：只支持数字、英文
+# 字母和中文）——变量名称作掩码文本时先过滤为该字符集
+MASK_TEXT_OK = re.compile(r"[0-9A-Za-z一-鿿]")
+
+
+def mask_text_from_name(name: str) -> str:
+    """变量名称 -> 掩码替换文本：仅保留中文/英文字母/数字（去下划线、
+    括号等其他字符），满足服务端对 MaskContent 的字符约束。
+
+    prompt 2026-10-12：设置"是否掩码并替换"为是时，掩码字段使用变量
+    名称仅保留中文+字母+数字的结果（此前原样使用变量名称，名称含
+    下划线/括号等会被服务端拒绝 code=101）。清洗后为空时抛 ValueError。
+    """
+    text = "".join(ch for ch in str(name or "") if MASK_TEXT_OK.match(ch))
+    if not text:
+        raise ValueError(
+            f"变量名称 {name!r} 清洗后不含中文/字母/数字，无法生成合法"
+            "掩码替换文本（服务端仅支持数字、英文字母和中文）")
+    return text
 
 
 # 剧本名称安全后缀（prompt 2026-09-07）：仅允许删除/导入以该后缀命名的
@@ -255,6 +336,8 @@ class VolcAIBotClient:
         self.logger = logger or logging.getLogger("volc_aibot")
         self._http_lock = threading.Lock()
         self._http: requests.Session | None = None
+        # 建会话时使用的 Cookie 来源签名（切换来源后自动重建，实时生效）
+        self._http_source_sig: str = ""
         self._resolve_lock = threading.Lock()
         self._resolved: dict[str, dict] = {}   # script_id -> coords（缓存）
         # ---- 账号守卫（prompt：所有请求前校验登录账号；cookie 未变化时免查） ----
@@ -276,7 +359,11 @@ class VolcAIBotClient:
     # ---------------------------------------------------------------- 会话/Cookie
 
     def _build_http(self) -> requests.Session:
-        """取 Cookie 构建 requests 会话（不写死任何 Cookie）。"""
+        """取 Cookie 构建 requests 会话（不写死任何 Cookie）。
+
+        Cookie 来源取全局配置的当前来源（日常 Chrome 插件 profile / CDP
+        端口），由配置页维护、页面右上角切换；不跨来源自动回退。
+        """
         cookies, cookie_header = query_cookies(BASE_URL, self.cookie_api)
         s = requests.Session()
         s.verify = False  # 兼容自签/内网证书（api.md 约定）
@@ -297,16 +384,41 @@ class VolcAIBotClient:
             s.headers["x-csrf-token"] = csrf
         return s
 
+    def _invalidate_account_caches(self) -> None:
+        """Cookie 来源/账号切换后清理账号相关缓存（2026-11-03）。"""
+        self._resolved.clear()
+        self._group_names = None
+        self._hotwords_cache = None
+        self._user_cache = ("", {})
+        self._ladder_token = ("", "")
+        self._checked_cookie = ""
+        self._checked_account = ""
+
+    def clone(self) -> "VolcAIBotClient":
+        """创建同配置的独立客户端（并发导出时每线程一个，避免共享
+        requests.Session；只用于查询/导出，不复制缓存）。"""
+        return VolcAIBotClient(
+            cookie_api=self.cookie_api, timeout=self.timeout,
+            product=self.product, logger=self.logger,
+            enforce_account=False)
+
     def _get_http(self) -> requests.Session:
+        sig = cookie_source_signature()
         with self._http_lock:
-            if self._http is None:
+            # 页面右上角切换来源后，已建立的会话需要重建才能生效；
+            # 账号可能不同，必须同时清空账号相关缓存（C1）
+            if self._http is None or self._http_source_sig != sig:
+                if self._http_source_sig and self._http_source_sig != sig:
+                    self._invalidate_account_caches()
                 self._http = self._build_http()
+                self._http_source_sig = sig
             return self._http
 
     def _refresh_http(self) -> requests.Session:
-        """Cookie 失效（401/403）后重取 Cookie 重建会话。"""
+        """Cookie 失效（401 或非权限类 403）后按当前来源重取 Cookies。"""
         with self._http_lock:
             self._http = self._build_http()
+            self._http_source_sig = cookie_source_signature()
             return self._http
 
     # ---------------------------------------------------------------- 账号守卫
@@ -448,6 +560,14 @@ class VolcAIBotClient:
 
     # ---------------------------------------------------------------- 底层请求
 
+    @staticmethod
+    def _permission_denied(resp: requests.Response) -> bool:
+        """响应是否为服务端权限拒绝（403 no permission），而非登录失效。"""
+        text = (resp.text or "").lower()
+        return any(k in text for k in (
+            "no permission", "permission denied", "无权限", "没有权限",
+            "权限不足"))
+
     def _request_raw(self, method: str, url: str,
                      params: dict | None = None,
                      payload: dict | None = None,
@@ -497,27 +617,54 @@ class VolcAIBotClient:
                 resp = s.request(method, url, params=params, data=body,
                                  files=files, headers=headers,
                                  timeout=self.timeout)
-                if resp.status_code in (401, 403) and attempt == 0:
-                    self.logger.info("HTTP %s，刷新 Cookie 重试: %s",
-                                     resp.status_code, url)
+                if resp.status_code == 401 and attempt == 0:
+                    self.logger.info("HTTP 401，刷新 Cookie 重试: %s", url)
+                    continue
+                # 权限类 403（no permission）刷新 Cookie 无意义；其他 403
+                # 可能是会话/网关问题，仍刷新一次（C5）
+                if (resp.status_code == 403 and attempt == 0
+                        and not self._permission_denied(resp)):
+                    self.logger.info("HTTP 403（非权限），刷新 Cookie 重试: %s",
+                                     url)
                     continue
                 break
             assert resp is not None
             if resp.status_code != 200:
-                if resp.status_code in (401, 403):
+                if resp.status_code == 403:
+                    if self._permission_denied(resp):
+                        # 2026-11-03：Schema="*" 等权限问题单独归因
+                        raise ApiError(
+                            f"{what or '请求'}失败：当前账号无该资源权限"
+                            f"（HTTP 403，no permission）。\n"
+                            "请检查项目组/剧本ID是否正确、当前登录账号是否有"
+                            "对应资源的访问权限；按通话ID查询时 Schema 只接受"
+                            "具体剧本ID（可显式传 script_id 后重试）。\n"
+                            f"[技术详情] {method} {url} HTTP 403: "
+                            f"{resp.text[:300]}")
+                    raise ApiError(
+                        f"{what or '请求'}失败：请求被拒绝（HTTP 403，"
+                        f"非 no permission，已刷新 Cookie 重试一次）。\n"
+                        "请检查当前 Cookie 来源是否有效、网关/Origin 限制，"
+                        "或稍后重试。\n"
+                        f"[技术详情] {method} {url} HTTP 403: "
+                        f"{resp.text[:300]}")
+                if resp.status_code == 401:
                     # 面向非技术用户：登录失效场景给出排查指引
                     # （与 docs/使用说明.md 常见问题一致）
                     raise ApiError(
                         f"{what or '请求'}失败：火山引擎返回未登录/登录已"
                         f"失效（HTTP {resp.status_code}），无法获取登录态。\n"
                         "请依次检查：\n"
-                        "1. 日常 Chrome 是否已登录火山引擎智能外呼控制台"
-                        "（https://console.volcengine.com/aibot），"
-                        "登录过期时请重新登录；\n"
-                        "2. chrome_capture_operate 服务是否正在正常运行"
+                        "1. 当前 Cookie 来源对应的 Chrome 是否已登录火山引擎智能外呼"
+                        "控制台（https://console.volcengine.com/aibot）："
+                        "日常 Chrome 来源需日常 Chrome 已登录；CDP 来源需"
+                        "用于抓包的 Chrome 已登录，登录过期时请重新登录；\n"
+                        "2. 可在配置页「Cookie 获取来源」或页面右上角切换"
+                        "到其他已启用来源（切换后实时生效）；\n"
+                        "3. chrome_capture_operate 服务是否正在正常运行"
                         "（默认 http://127.0.0.1:33445，可用浏览器访问"
                         "该地址确认）；\n"
-                        "3. Chrome 插件的 Cookie 推送范围是否允许"
+                        "4. Chrome 插件的 Cookie 推送范围是否允许"
                         " volcengine.com。\n"
                         f"[技术详情] {method} {url} HTTP "
                         f"{resp.status_code}: {resp.text[:300]}")
@@ -620,6 +767,15 @@ class VolcAIBotClient:
         for g in groups:
             if g.get("group_name") == group_name:
                 return g
+        # 区分“名称不存在”与“无通话明细权限”（B9，2026-11-03）
+        try:
+            record_groups = self._call_record_groups()
+        except ApiError:
+            record_groups = []
+        if any(g.get("group_name") == group_name for g in record_groups):
+            raise ApiError(
+                f"当前账号无该组通话明细权限: {group_name}（该组存在，但不在"
+                f"有通话明细权限的项目组列表中；请切换账号或联系管理员）")
         listed = "; ".join(f"{g.get('group_name')}({g.get('id')})"
                            for g in groups)
         raise ApiError(f"项目组不存在: {group_name}。可用项目组: {listed}")
@@ -1004,16 +1160,118 @@ class VolcAIBotClient:
                     f"发布失败: version={version} status={status} "
                     f"message={ti.get('message')}")
 
-    # ---------------------------------------------------------------- 剧本变量（定义 CRUD）
+    def publish_online(self, script_id: str,
+                       timeout: float = 600.0, interval: float = 3.0,
+                       on_poll: Callable[[dict], None] | None = None) -> dict:
+        """发布上线（生产变更：将当前测试版本发布到线上），轮询至完成。
 
-    def query_variables(self, script_id: str) -> list[dict]:
-        """查询剧本变量定义列表（global_variables，全量无分页）。
-
-        返回 [{"id","name","key","IsRequired","VariableType"}, ...]。
-        VariableType: 1=String 2=Integer 3=Float 4=Boolean。
-        注意：抓包中无“变量描述”字段（控制台该弹窗不支持描述）。
+        流程（2026-10-10 抓包 + 直连实测，脚本测试项目组剧本验证）：
+        1. GET release-launch 记录提交前 train_info（当前测试版本）与
+           online_info（当前线上版本）；
+        2. POST /online {"env_check_info":"test","golden_case_list":[],
+           "script_name":<剧本ID llm_xxx>,"start_time":"<当天 YYYY-MM-DD>"}
+           （URL 与 training 一样**无 group_id**）；响应 data.status 提交后
+           即为 "Succeeded"，data.version 为本次上线版本号（等于当前测试
+           版本）；
+        3. 轮询 release-launch，online_info.status=="Succeeded" 判定成功
+           （注意与 train_info 的 "FINISHED" 拼写不同）；同版本重复发布
+           实测幂等（仅 update_time 刷新）。
         """
         coords = self.resolve_script(script_id)
+        launch = self.get_release_launch(coords=coords)
+        before_train = launch.get("train_info") or {}
+        before_online = launch.get("online_info") or {}
+        current_version = before_train.get("version") or 0
+        online_version_before = before_online.get("version") or 0
+        if not current_version:
+            raise ApiError(
+                "发布上线失败：当前剧本无已发布的测试版本"
+                f"（train_info.version={current_version}），"
+                "请先调用 publish_preview 发布测试版本")
+
+        body = self._request_json(
+            "POST", self._service_url(coords, "online"),
+            payload={"env_check_info": "test", "golden_case_list": [],
+                     "script_name": coords.get("agent_id") or script_id,
+                     "start_time": time.strftime("%Y-%m-%d")},
+            referer=self._page_referer(coords, PAGE_MULTI_AGENT),
+            mutating=True, what="发布上线")
+        data = unwrap(body, "发布上线") or {}
+        submit_status = str(data.get("status") or "")
+        target_version = data.get("version")
+        if submit_status and submit_status.lower() != "succeeded":
+            raise ApiError(
+                f"发布上线提交失败: status={submit_status} "
+                f"message={data.get('message')} {data.get('online_bpm_url')}")
+        if target_version is None:
+            target_version = current_version
+        self.logger.info(
+            "已提交发布上线（剧本 %s，上线版本 V%s，提交前线上版本 V%s），"
+            "开始轮询...", script_id, target_version, online_version_before)
+
+        deadline = time.time() + timeout
+        last: dict = {}
+        while True:
+            if time.time() >= deadline:
+                raise ApiError(
+                    f"发布上线超时（>{timeout:.0f}s）：目标 version="
+                    f"{target_version}，最后状态={last}；请到控制台确认")
+            time.sleep(interval)
+            launch = self.get_release_launch(coords=coords)
+            oi = launch.get("online_info") or {}
+            last = {"version": oi.get("version"), "status": oi.get("status"),
+                    "message": oi.get("message")}
+            if on_poll:
+                on_poll(last)
+            version = oi.get("version")
+            status = str(oi.get("status") or "")
+            if version is not None and version == target_version \
+                    and status == "Succeeded":
+                return {
+                    "script_id": script_id,
+                    "agent_name": coords.get("agent_name"),
+                    "before_train_version": current_version,
+                    "before_online_version": online_version_before,
+                    "new_version": version,
+                    "status": "Succeeded",
+                    "update_time": oi.get("update_time"),
+                    "message": oi.get("message"),
+                    "note": "",
+                }
+            if version is not None and version == target_version \
+                    and status.upper() in ("FAILED", "ERROR"):
+                raise ApiError(
+                    f"发布上线失败: version={version} status={status} "
+                    f"message={oi.get('message')} bpm_url={oi.get('bpm_url')}")
+
+    # ---------------------------------------------------------------- 剧本变量（定义 CRUD）
+
+    def query_variables(self, script_id: str,
+                        coords: dict | None = None) -> list[dict]:
+        """查询剧本变量定义列表（global_variables，全量无分页）。
+
+        coords：可选数字坐标（批量场景由调用方从 agent/list 传入，
+        省一次剧本ID解析）；缺省时按 script_id 解析。
+        返回变量原样字段（2026-10-10 晚补充前置传入/描述抓包实测，
+        三类剧本同口径，共 9 个字段）：
+        {"id","name","key","IsRequired","VariableType","Description",
+         "IsPreset","IsMasked","MaskContent"}。
+        - VariableType: 1=String 2=Integer 3=Float 4=Boolean；
+        - IsPreset（**前置传入**，控制台全局变量弹窗的开关列）：
+          IsPreset=false 时该变量不是调用前传入变量；
+        - ⚠ **IsRequired（是否必填）受 IsPreset（前置传入）联动约束**
+          （2026-10-10 晚直连实测）：IsPreset=false 时必填恒为 false——
+          控制台 UI 直接禁用“是否必填”下拉，服务端对 POST 中
+          IsRequired=true 且 IsPreset=false 的载荷**不报错但静默置回
+          false**（add/update 均如此）。要必填生效必须同时
+          IsPreset=true；Description 未设置时 GET 中无该字段（omitempty）；
+        - IsMasked（是否掩码并替换）/MaskContent（掩码替换文本）为掩码
+          字段；未设置过掩码文本的变量 GET 中**无 MaskContent 字段**
+          （omitempty）；MaskContent 仅支持数字/英文/中文；
+        - Description（变量描述，2026-10-10 晚控制台新增列）：未设置时
+          字段省略（omitempty）。
+        """
+        coords = coords or self.resolve_script(script_id)
         result = self._service_json("GET", coords, "llm/global_variables",
                                     what="查询剧本变量")
         return (result or {}).get("Variables") or []
@@ -1024,17 +1282,68 @@ class VolcAIBotClient:
                          delete_ids: list[int] | None = None) -> dict:
         """剧本变量新增/修改/删除（同一个 POST 的 diff 三段结构）。
 
-        - add:    [{"name","key","IsRequired","VariableType"}]（不传 id）
-        - update: [{"id","name","key","IsRequired","VariableType"}]（必须带 id）
+        - add:    [{"name","key","IsRequired","VariableType", ...}]（不传 id）
+        - update: [{"id", ...需修改的字段}]（必须带 id；字段名与 GET 响应
+                  一致，含 IsPreset/IsMasked/MaskContent/Description）
         - delete: [变量数字ID, ...]（不是调用名称）
-        实现按抓包原样：update 数组全量回传所有未删除的存量变量。
+        实现按抓包原样：update 数组全量回传所有未删除的存量变量；
+        **按 GET 响应原样全量回传全部字段再叠加 update 中的修改**
+        （2026-10-10 掩码抓包+直连实测更新：此前硬编码 5 字段
+        id/name/key/IsRequired/VariableType 会把 IsPreset/IsMasked 重置为
+        false（掩码失效），必须全字段回传）。
 
-        返回 {"before","after","payload"}：POST 响应恒为空 Result，
-        成功判据以回查 GET 为准（调用方负责比对/落盘）。
+        ⚠ 前置传入（IsPreset）与是否必填（IsRequired）联动（2026-10-10
+        晚直连实测）：服务端对 IsRequired=true 且 IsPreset=false 的载荷
+        **不报错但静默置 IsRequired=false**（add/update 均如此，控制台 UI
+        同步禁用必填下拉）。本方法内置联动修正：
+        - IsRequired=true 且 IsPreset 不为 true → 自动置 IsPreset=true
+          （否则必填设置静默失效），修正记录在返回值 notes；
+        - 显式 IsPreset=false 且（叠加后）IsRequired=true 属于调用方
+          矛盾输入，同样按上一条自动置 IsPreset=true。
+
+        Description（变量描述）支持：
+        - add/update 可带 "Description"（字符串）；
+        - 清除描述传 "Description": ""（空串，直连实测：空串清除，
+          null 与省略字段均为 no-op 保留原值——注意与常见 omitempty
+          直觉相反，勿用 null 清除）；
+        - update 未带 Description 时按 GET 原样回传（保留现有描述）。
+
+        返回 {"before","after","payload","notes"}：POST 响应恒为空
+        Result，成功判据以回查 GET 为准（调用方负责比对/落盘）；
+        notes 为联动修正说明列表（无修正时为空列表）。
+        注意：掩码替换文本 MaskContent 服务端仅接受数字/英文/中文
+        （含下划线等字符报错 101）。
         """
         add = [dict(x) for x in (add or [])]
         update = [dict(x) for x in (update or [])]
         delete_ids = list(delete_ids or [])
+        notes: list[str] = []
+
+        # 前置传入(IsPreset) -> 是否必填(IsRequired) 联动修正：
+        # 显式矛盾输入直接报错；仅单侧设置时按语义自动补另一侧
+        for item in add:
+            if item.get("IsRequired") and item.get("IsPreset") is False:
+                raise ApiError(
+                    f"新增变量 {item.get('key')} 入参矛盾：IsRequired=true "
+                    "与 IsPreset=false 不能同时指定（服务端会静默置必填为"
+                    "否）；请去掉 IsPreset=false（必填=true 会自动联动置"
+                    "前置传入=true）")
+            if item.get("IsRequired") and not item.get("IsPreset"):
+                item["IsPreset"] = True
+                notes.append(
+                    f"add {item.get('key')}: 必填=true 已联动置前置传入"
+                    "(IsPreset)=true（否则服务端静默置必填为否）")
+        for u in update:
+            has_req, has_preset = "IsRequired" in u, "IsPreset" in u
+            if (u.get("IsRequired") is True and u.get("IsPreset") is False
+                    and has_req and has_preset):
+                raise ApiError(
+                    f"修改变量 id={u.get('id')} 入参矛盾：IsRequired=true "
+                    "与 IsPreset=false 不能同时指定；设必填请去掉 "
+                    "IsPreset=false，关前置传入请同时把 IsRequired 置 false")
+        for u in update:
+            if "IsPreset" in u and u["IsPreset"] is False and "IsRequired" not in u:
+                u["_auto_req_off"] = True  # 关前置传入时联动关必填（叠加后处理）
 
         coords = self.resolve_script(script_id)
         before = self.query_variables(script_id)
@@ -1047,17 +1356,33 @@ class VolcAIBotClient:
                 raise ApiError(f"删除变量失败：变量ID {d} 不存在")
 
         update_payload: list[dict] = []
+        delete_id_set = set(delete_ids)
         for v in before:
-            if v.get("id") in set(delete_ids):
+            if v.get("id") in delete_id_set:
                 continue  # 被删除的变量不再出现在 update 数组
-            item = {"id": v.get("id"), "name": v.get("name"),
-                    "key": v.get("key"), "IsRequired": v.get("IsRequired"),
-                    "VariableType": v.get("VariableType")}
+            # 按 GET 响应原样全量回传全部字段（含 IsPreset/IsMasked/
+            # MaskContent/Description 等字段），再叠加 update 显式给出的修改
+            item = dict(v)
             for u in update:
                 if u.get("id") == v.get("id"):
-                    for field in ("name", "key", "IsRequired", "VariableType"):
-                        if field in u:
-                            item[field] = u[field]
+                    item.update({k: u[k] for k in u
+                                 if k not in ("id", "_auto_req_off")})
+                    if u.get("_auto_req_off") and item.get("IsRequired"):
+                        # 显式关前置传入：镜像控制台行为联动关必填
+                        item["IsRequired"] = False
+                        notes.append(
+                            f"update id={v.get('id')}({v.get('key')}): "
+                            "前置传入=false 已联动置必填(IsRequired)=false"
+                            "（服务端语义二者绑定，必填仅在前置传入=true 时"
+                            "有效）")
+                    if (u.get("IsRequired") is True
+                            and not item.get("IsPreset")):
+                        # 显式设必填：联动开前置传入（否则服务端静默置回否）
+                        item["IsPreset"] = True
+                        notes.append(
+                            f"update id={v.get('id')}({v.get('key')}): "
+                            "必填=true 已联动置前置传入(IsPreset)=true"
+                            "（否则服务端静默置必填为否）")
             update_payload.append(item)
 
         payload = {"Variables": {"delete": delete_ids,
@@ -1067,7 +1392,8 @@ class VolcAIBotClient:
                            payload=payload, what="剧本变量修改",
                            mutating=True)
         after = self.query_variables(script_id)
-        return {"before": before, "after": after, "payload": payload}
+        return {"before": before, "after": after, "payload": payload,
+                "notes": notes}
 
     # ---------------------------------------------------------------- 测试版本全局变量（赋值）
 
@@ -1085,7 +1411,12 @@ class VolcAIBotClient:
 
     def fetch_preview_variable_values(self, script_id: str | None = None,
                                       coords: dict | None = None) -> dict:
-        """取测试版本变量取值 {key: value}（文本对话 context 的默认值来源）。"""
+        """取测试版本变量取值 {key: value}（文本对话 context 的默认值来源）。
+
+        含全部变量（与控制台一致，前置传入=否的带默认值"无"）；
+        对话测试实际只需前置传入=是 的变量有值（见 talk 说明，
+        2026-10-11 实测：省略非前置传入变量对话行为完全一致）。
+        """
         result = self.get_script_variables(script_id=script_id, coords=coords)
         return {v["key"]: v.get("value", "")
                 for v in result.get("PreviewVariables") or []}
@@ -1097,22 +1428,59 @@ class VolcAIBotClient:
         values: {变量调用名称: 新值}；值会经 normalize_value 转字符串。
         **必填变量（is_required=true）的赋值不能为空**——传入空值
         （""/None/"无"）会抛 ApiError 提示（prompt 约定）。
-        返回 {"before","after","values","verify_failed"}；verify_failed
-        非空表示回读后仍有变量未生效（POST 响应为空，以回读为准）。
+        ⚠ 前置传入（is_preset=false）语义（2026-10-11 副本剧本实测）：
+        控制台"变量赋值"面板**只显示前置传入=是的变量**（对话测试只需
+        为它们指定值，必填的前置传入变量未赋值会被阻断开始测试）；
+        直连为本方法赋值 is_preset=false 的变量服务端仍接受并持久化
+        （只是控制台赋值面板不显示该值），返回值 non_preset 提示。
+        返回 {"before","after","values","verify_failed","non_preset"}；
+        verify_failed 非空表示回读后仍有变量未生效（POST 响应为空，
+        以回读为准）；non_preset 为被赋值的非前置传入变量名列表（提示性）。
         """
+        return self._assign_variables(script_id, values, env="preview")
+
+    def set_online_variables(self, script_id: str,
+                             values: dict[str, Any]) -> dict:
+        """线上版本全局变量赋值（全量提交 OnlineVariables，仅改目标 key）。
+
+        与测试版本赋值同端点（POST llm/script_variables）、**body 键为
+        OnlineVariables**（2026-10-13 晚控制台抓包+页面直连实测：弹窗
+        "线上版本"标签提交即此格式，响应 Result:{}、赋值即时生效——
+        **直接修改线上外呼使用的变量值，无需发布**）。
+        ⚠ 生产变更：线上赋值直接影响实际外呼通话（受修改守卫控制，
+        建议谨慎使用）；必填变量（is_required=true）赋值不能为空。
+        返回结构与 set_preview_variables 一致（before/after 为线上变量）。
+        """
+        return self._assign_variables(script_id, values, env="online")
+
+    def _assign_variables(self, script_id: str, values: dict[str, Any],
+                          env: str = "preview") -> dict:
+        """变量赋值共用实现（env=preview 测试版本 / online 线上版本）。
+
+        全量提交对应环境变量清单（仅改目标 key 的 value）；POST 响应
+        为空 Result，以回读 GET 为准。
+        """
+        if env not in ("preview", "online"):
+            raise ApiError(f"env 必须是 preview 或 online: {env!r}")
+        list_key = "PreviewVariables" if env == "preview" else "OnlineVariables"
+        env_label = "测试版本" if env == "preview" else "线上版本"
         norm = {str(k): normalize_value(v) for k, v in values.items()}
         if not norm:
             raise ApiError("未提供任何要赋值的变量")
 
+        # 修改守卫前置：开关关闭/账号不符时不必先解析剧本（2026-11-03：
+        # 避免剧本不存在时把守卫问题误报为“剧本不存在”）
+        self.ensure_account_allowed(mutating=True)
+
         coords = self.resolve_script(script_id)
         before_result = self.get_script_variables(coords=coords)
-        before = before_result.get("PreviewVariables") or []
+        before = before_result.get(list_key) or []
         before_map = {v.get("key"): v for v in before}
         missing = [k for k in norm if k not in before_map]
         if missing:
             raise ApiError(
-                f"以下变量不存在于该剧本的测试版本变量中: {missing}；"
-                f"可先调用查询剧本变量确认调用名称")
+                f"以下变量不存在于该剧本的{env_label}变量中: {missing}；"
+                f"可先调用查询剧本变量确认调用名称（线上变量需剧本已发布上线）")
 
         # 必填变量赋值不能为空（prompt 约定；抓包实证：必填空值提交
         # 会被服务端拒绝 code=101 "变量未赋值：xxx"）
@@ -1124,68 +1492,268 @@ class VolcAIBotClient:
                 f"以下变量为必填变量，赋值时值不能为空: {empty_required}；"
                 f"请为它们提供非空值（查询变量时 is_required=true 的均为必填）")
 
-        preview = []
+        # 非前置传入变量赋值提示（不阻断：直连服务端接受，控制台不显示）
+        non_preset = [k for k in norm
+                      if (before_map.get(k) or {}).get("is_preset") is False]
+        if non_preset:
+            self.logger.warning(
+                "以下变量前置传入=false，控制台\"变量赋值\"面板不显示"
+                "（对话测试无需为它们指定值），本次直连赋值仍会保存: %s",
+                non_preset)
+
+        payload_list = []
         for v in before:
             item = dict(v)
             if item.get("key") in norm:
                 item["value"] = norm[item["key"]]
-            preview.append(item)
+            payload_list.append(item)
 
         self._service_json("POST", coords, "llm/script_variables",
-                           payload={"PreviewVariables": preview},
-                           what="测试版本全局变量赋值", mutating=True)
+                           payload={list_key: payload_list},
+                           what=f"{env_label}全局变量赋值", mutating=True)
         after_result = self.get_script_variables(coords=coords)
-        after = after_result.get("PreviewVariables") or []
+        after = after_result.get(list_key) or []
         after_map = {v.get("key"): v.get("value") for v in after}
         verify_failed = {k: {"expect": norm[k], "actual": after_map.get(k)}
                          for k in norm if after_map.get(k) != norm[k]}
         return {"before": before, "after": after,
-                "values": norm, "verify_failed": verify_failed}
+                "values": norm, "verify_failed": verify_failed,
+                "non_preset": non_preset}
+
+    # ---------------------------------------------------------------- 通话测试（真实拨号）
+
+    def start_call_test(self, script_id: str,
+                        phone_numbers: "str | list[str]",
+                        env: str = "preview",
+                        variables: dict | None = None,
+                        wait_result: bool = True,
+                        timeout: float = 90.0,
+                        poll_interval: float = 5.0,
+                        on_poll: "Callable[[list], None] | None" = None) -> dict:
+        """发起通话测试（POST /console/api/v2/debug/outbound，真实拨打电话）。
+
+        对应控制台「测试与发布 → 通话测试」：以电话沟通形式测试剧本，
+        结果出现在通话明细（call_list，Env=preview/online 区分）。
+
+        - script_id：剧本ID（llm_xxx）；
+        - phone_numbers：被叫号码（单个字符串或列表；主叫号码恒为平台
+          默认——控制台同名选项，接口不传主叫字段）；
+        - env："preview"=测试版本（默认）/ "online"=线上版本；
+        - variables：可选 {调用名称: 值}，**仅 env=preview 支持**（先
+          set_preview_variables 赋值再发起——变量经 user_params.dsParam
+          回调接口注入：preview 用 PreviewCallParams.key 服务当前赋值，
+          online 用 OnlineCallParams.key 服务线上发布时的快照值、
+          不能离线指定）；env=online 时传 variables 抛错；
+        - wait_result：发起后轮询 call_list（按 Env+提交时间过滤）至
+          记录出现或超时（记录几秒~十几秒后可见；轮次/挂断由被叫方
+          行为决定，工具只等到记录出现即返回）。
+        返回 {script_id, env, phone_numbers, variables, submitted_at,
+               call_records, timed_out}；call_records 为匹配到的通话
+               记录（被叫隐藏/Env/接通/SIP/轮次/时间/CallID/评级）。
+        ⚠ 真实拨打被叫号码（占用生产外呼资源）：生产剧本慎用，建议
+          在测试项目组剧本上验证。
+        """
+        import datetime as _dt
+        env = str(env or "").strip().lower()
+        if env not in ("preview", "online"):
+            raise ApiError(f"env 必须是 preview（测试版本）或 online（线上"
+                           f"版本），收到: {env!r}")
+        phones = ([phone_numbers] if isinstance(phone_numbers, str)
+                  else [str(p) for p in (phone_numbers or [])])
+        phones = [p.strip() for p in phones if p.strip()]
+        if not phones:
+            raise ApiError("phone_numbers 不能为空（被叫号码）")
+
+        coords = self.resolve_script(script_id)
+        # 指定变量：仅 preview 环境（先赋值，值经 dsParam 回调生效）
+        if variables:
+            if env != "preview":
+                raise ApiError(
+                    "指定变量仅支持 env=preview（测试版本）：线上环境变量"
+                    "来自发布时的快照（OnlineVariables），不能在发起通话时"
+                    "指定；如需线上验证新值请先发布上线")
+            self.set_preview_variables(script_id, variables)
+
+        # 取对应环境的回调参数 key（变量注入通道）
+        sv = self.get_script_variables(coords=coords)
+        params_key = ("PreviewCallParams" if env == "preview"
+                      else "OnlineCallParams")
+        cp = sv.get(params_key) or {}
+        key = cp.get("key")
+        if not key:
+            raise ApiError(
+                f"剧本 {script_id} 无 {params_key}.key（"
+                + ("剧本从未发布上线" if env == "online"
+                   else "剧本从未发布测试版本") + "），无法发起通话测试")
+        payload = {
+            "script": script_id,
+            "env": env,
+            "phone_numbers": phones,
+            "user_params": {"dsParam": {
+                "_parserType": "interface",
+                "_interfaceInfo": {
+                    "key": key,
+                    "psm": cp.get("psm") or "lab.speech.robot_param_callback",
+                }}},
+        }
+        # 注意：URL 无 projects/products/services 前缀（console 顶层路由）
+        body = self._request_json(
+            "POST", f"{BASE_URL}/console/api/v2/debug/outbound",
+            params={"group_id": coords["group"]}, payload=payload,
+            referer=self._page_referer(coords, PAGE_MULTI_AGENT),
+            mutating=True, what="发起通话测试")
+        # 响应为 {"code":0,"data":{},"msg":"ok"} 包装（同 release-launch，
+        # 非 ResponseMetadata 风格）；code!=0 时 unwrap 抛错
+        unwrap(body, "发起通话测试")
+        submitted_at = _dt.datetime.now()
+
+        records: list[dict] = []
+        timed_out = False
+        if wait_result:
+            deadline = time.time() + timeout
+            while True:
+                time.sleep(poll_interval)
+                raw = self._recent_call_records(coords, script_id)
+                records = self._match_call_records(
+                    raw, env, submitted_at, phones)
+                if on_poll:
+                    on_poll(records)
+                if len(records) >= len(phones) or time.time() >= deadline:
+                    timed_out = len(records) < len(phones)
+                    break
+        return {"script_id": script_id, "env": env,
+                "phone_numbers": phones,
+                "variables": variables or {},
+                "submitted_at": submitted_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "call_records": records, "timed_out": timed_out}
+
+    def _recent_call_records(self, coords: dict, schema: str,
+                             page_size: int = 20) -> list[dict]:
+        """call_list 首页记录（控制台通话明细页同口径：Schema 精确过滤）。"""
+        body = self._request_json(
+            "POST", f"{BASE_URL}/console/api/v2/llm/call_list",
+            params={"group_id": coords["group"]},
+            payload={"PageSize": page_size, "PageStartIndex": 0,
+                     "Schema": schema},
+            referer=self._page_referer(coords, PAGE_MULTI_AGENT),
+            what="查询通话测试记录")
+        result = unwrap(body, "查询通话测试记录") or {}
+        return result.get("Data") or []
+
+    @staticmethod
+    def _match_call_records(raw: list[dict], env: str,
+                            submitted_at: "datetime.datetime",
+                            phones: list[str]) -> list[dict]:
+        """从 call_list 首页记录中匹配本次发起的通话（Env+提交时间窗）。
+
+        call_list 的 PhoneNumber 为空（列表脱敏），无法按号码匹配——
+        按 Env 相同且 CreateDate>=提交时间过滤。
+        """
+        out = []
+        for rec in raw or []:
+            if str(rec.get("Env") or "") != env:
+                continue
+            created = _parse_second_time(rec.get("CreateDate"))
+            if created is None or created < submitted_at:
+                continue
+            out.append({
+                "create_time": rec.get("CreateDate"),
+                "env": rec.get("Env"),
+                "connected": bool(rec.get("IsConnected")),
+                "sip_code": rec.get("SIPCode"),
+                "duration_seconds": round(
+                    int(rec.get("Duration") or 0) / 1000, 1),
+                "rounds": rec.get("Rounds"),
+                "grading": (rec.get("RobotGrading")
+                            or (rec.get("GradingInfo") or {}).get(
+                                "RobotGrading") or ""),
+                "call_id": rec.get("CallID"),
+            })
+        out.sort(key=lambda r: str(r.get("create_time")))
+        return out[:len(phones)]
 
     # ---------------------------------------------------------------- 查询通话明细
 
     def query_call_records(
             self, group_name: str, script_id: str,
-            date_start: str, date_end: str,
+            date_start: str = "", date_end: str = "",
             grading: str | None = None,
+            labeled_grading: str | None = None,
             duration_op: str | None = None,
             duration_value: int | None = None,
             duration_min: int | None = None,
             duration_max: int | None = None,
             answer_recognize: str | None = None,
+            search_id: str | None = None,
+            search_type: str | None = None,
+            env: str | None = None,
+            is_connected: bool | None = None,
+            task_ids: str | None = None,
+            order_by: str | None = None,
+            sort_type: int | None = None,
+            raw: bool = False,
             page_size: int = 100,
             max_pages: int = 200,
-            page_index: int | None = None) -> dict:
+            page_index: int | None = 0,
+            all_pages: bool = False,
+            max_records: int | None = None) -> dict:
         """查询通话明细（POST /console/api/v2/llm/call_list?group_id={g}）。
 
-        必填：group_name（项目组名）、script_id（剧本ID）、
-        date_start/date_end（"YYYY-MM-DD HH:MM:SS" 或 "YYYY-MM-DD"）。
-        可选过滤（prompt 约定，2026-09-06 22:51 抓包实证）：
+        group_name（项目组名）、script_id（剧本ID）必填；
+        date_start/date_end（"YYYY-MM-DD HH:MM:SS" 或 "YYYY-MM-DD"）
+        在普通过滤查询时必填，按通话ID查询（search_id +
+        search_type=parent_or_session_id）时可为空。
+        可选过滤（与通话明细页一致，2026-11-02 补齐）：
         - grading：意向等级（非固定值，如 A/B/高意愿，原样传
-          RobotGrading）；
+          RobotGrading；多个可用半角逗号连接）；
+        - labeled_grading：人工标记等级（LabeledGrading）；
         - duration_op：通话时长判断方式 "大于等于"/"小于"/"介于"；
           对应 DurationStart/DurationEnd（毫秒）：
           大于等于 -> Start=value；小于 -> End=value（Start=0）；
           介于 -> Start=min, End=max；
         - answer_recognize：命中语音助手 "是"/"否"/"未启用识别能力"；
-          是->AnswerRecognizeType=1，否->2，未启用->0
-          （实测：=0 精确匹配未启用识别的记录；不传该键=不过滤）；
+          是->AnswerRecognizeType=2，否->1，未启用->0
+          （2026-11-03 修正：原映射 是->1/否->2 是**反的**——服务端
+          1 对应 IsNonhumanAnswer=false、2 对应 true，抓包与线上双证；
+          =0 精确匹配未启用识别的记录；不传该键=不过滤）；
+        - search_id/search_type：页面「通话id/被叫号码」搜索，
+          search_type=parent_or_session_id（通话id，默认）或
+          phone_number（被叫号码）；
+        - env：环境类型 "preview"（测试）/"online"（线上）；
+        - is_connected：接通状态 True=接通 / False=未接通；
+        - task_ids：任务ID（页面「任务名称」对应 TaskIDs）；
+        - order_by/sort_type：排序字段（Duration/Rounds）与方向
+          （1=升序、2=降序）；
+        - raw=True：records 返回服务端原始条目（含 IsDataPruned/
+          SessionURL/SessionID 等，供导出通话文本使用）；
         - 单位换算：输入的秒统一乘 1000 传服务端。
 
-        分页（prompt 2026-09-06：分页查询只需要查询第一页）：
-        - page_index=None（默认）：自动翻页收集全部（至 max_pages，
-          **受服务端 10000 条翻页上限约束**：PageStartIndex≥约 10000 时
-          服务端报 Code=101"翻页不支持超过10000条，请通过导出查看"；
-          实测上限≈已收集 9990 条（psi=490×20 OK，500 报错），触达时
-          停止翻页并带 truncated 标记，结果仍可用）；
-        - page_index>=0：**单页模式**——只取第 page_index 页（0 基），
-          不自动翻满；返回带 page_index/total_pages 供翻页。
+        分页（2026-11-03 改为默认单页，B6）：
+        - 默认 page_index=0：**单页模式**，只取第一页（0 基），返回带
+          page_index/total_pages；
+        - all_pages=True：自动翻页收集全部（至 max_pages，**受服务端
+          10000 条翻页上限约束**：PageStartIndex≥约 10000 时服务端报
+          Code=101"翻页不支持超过10000条，请通过导出查看"；触达时停止
+          翻页并带 truncated/warning 标记，结果仍可用）；
+        - max_pages 用尽但未收全时也会带 truncated/warning，避免静默不完整；
+        - max_records 可选：all_pages 时收满该条数即停止翻页（导出 limit 用）；
+        - 显式传 page_index>=0 仍按单页处理。
 
         返回 {total, records: [{被叫号码/主叫号码/接通状态/SIP状态码/
         通话时长秒/交互轮次/环境类型/命中语音助手/意向等级/信息抽取/
         短信状态/创建时间/通话ID...}], page_index?, total_pages?}
         （page_size 建议 20~100，抓包页面用 20）。
         """
+        script_id = str(script_id or "").strip()
+        if all_pages:
+            page_index = None
+        elif page_index is None:
+            page_index = 0
+        if not script_id:
+            # 服务端 Schema 只接受具体剧本ID；传 "*" 会 403 code=103，
+            # 这里直接按参数缺失失败，避免把问题推给服务端（B3）
+            raise ApiError(
+                "参数缺失：script_id 必填（服务端 Schema 不接受 '*'）")
         group = self.find_group(group_name)
         gid = group["id"]
         # 时长过滤 -> DurationStart/DurationEnd（毫秒）
@@ -1198,14 +1766,16 @@ class VolcAIBotClient:
         elif duration_op == "介于":
             ds = int(duration_min or 0) * 1000
             de = int(duration_max or 0) * 1000
-        # 命中语音助手 -> AnswerRecognizeType（prompt 2026-09-07：
-        # 0=未启用识别能力，实测=0 精确过滤未启用识别的剧本记录；
-        # 不传该键=不过滤（与 0 语义不同，勿混用））
+        # 命中语音助手 -> AnswerRecognizeType（2026-11-03 实证修正：
+        # 服务端 2=是（IsNonhumanAnswer=true）、1=否（false）、0=未启用
+        # 识别能力；旧映射 是->1/否->2 是反的，导致筛「真人接听」筛到
+        # AI 助理。0 精确过滤未启用识别的剧本记录；不传该键=不过滤，
+        # 与 0 语义不同，勿混用）
         art: int | None = None
         if answer_recognize == "是":
-            art = 1
-        elif answer_recognize == "否":
             art = 2
+        elif answer_recognize == "否":
+            art = 1
         elif answer_recognize == "未启用识别能力":
             art = 0
         # 其他值/不传 -> 不过滤
@@ -1213,22 +1783,41 @@ class VolcAIBotClient:
         records: list[dict] = []
         total = 0
         truncated = False
+        limited = False
         for page in range(max_pages):
             payload: dict[str, Any] = {
-                "DateStart": date_start,
-                "DateEnd": date_end,
                 "PageSize": page_size,
                 "PageStartIndex": len(records),
                 "Schema": script_id,
             }
+            if date_start:
+                payload["DateStart"] = date_start
+            if date_end:
+                payload["DateEnd"] = date_end
             if grading:
                 payload["RobotGrading"] = grading
+            if labeled_grading:
+                payload["LabeledGrading"] = labeled_grading
             if ds is not None:
                 payload["DurationStart"] = ds
             if de is not None:
                 payload["DurationEnd"] = de
             if art is not None:
                 payload["AnswerRecognizeType"] = art
+            if search_id:
+                payload["SearchID"] = search_id
+                payload["SearchType"] = (search_type
+                                         or "parent_or_session_id")
+            if env:
+                payload["Env"] = env
+            if is_connected is not None:
+                payload["IsConnected"] = bool(is_connected)
+            if task_ids:
+                payload["TaskIDs"] = task_ids
+            if order_by:
+                payload["OrderBy"] = order_by
+            if sort_type is not None:
+                payload["SortType"] = int(sort_type)
             # 单页模式（page_index 非 None）：偏移=页号*页大小
             if page_index is not None:
                 payload["PageStartIndex"] = int(page_index) * page_size
@@ -1252,8 +1841,15 @@ class VolcAIBotClient:
                         break
                 raise
             data = result.get("Data") or []
-            records.extend(self._call_record_row(c) for c in data)
+            records.extend(data if raw
+                           else [self._call_record_row(c) for c in data])
             total = result.get("Count") or 0
+            # 导出 limit：只收集需要的条数，避免大剧本全量翻页（B2）
+            if (all_pages and max_records is not None
+                    and len(records) >= int(max_records)):
+                records = records[:int(max_records)]
+                limited = True
+                break
             # 单页模式：取一页即返回（附页信息供翻页）
             if page_index is not None:
                 import math
@@ -1265,17 +1861,29 @@ class VolcAIBotClient:
                     "total_pages": (math.ceil(total / page_size)
                                     if page_size else 0),
                     "page_size": page_size,
-                    "mode": "单页（page_index 指定；不传=自动收集全部）",
+                    "mode": "单页（page_index 指定；all_pages=True 才收集全部）",
                 }
             if not data or len(records) >= total:
                 break
         out = {"total": total, "count": len(records), "records": records}
+        if limited:
+            out["limited"] = True
+        if not truncated and not limited and total and len(records) < total:
+            truncated = True
+            if not out.get("note"):
+                out["note"] = (f"已达到 max_pages={max_pages} 上限，"
+                               f"已收集 {len(records)}/{total} 条；"
+                               f"如需全部请缩小时间范围或分时间段查询")
         if truncated:
             out["truncated"] = True
-            out["note"] = (f"服务端翻页上限（Code=101，PageStartIndex "
-                           f"约 {len(records)} 条处触达），"
-                           f"已收集 {len(records)}/{total} 条；"
-                           f"如需全部请缩小时间范围或分时间段查询")
+            out.setdefault(
+                "note",
+                (f"服务端翻页上限（Code=101，PageStartIndex 约 "
+                 f"{len(records)} 条处触达），已收集 {len(records)}/{total} 条；"
+                 f"如需全部请缩小时间范围或分时间段查询"))
+            out["warning"] = ("结果不完整（已收集 "
+                              f"{len(records)}/{total} 条），建议缩窄时间窗"
+                              "或缩小 page_size/分段导出")
         return out
 
     @staticmethod
@@ -1309,6 +1917,167 @@ class VolcAIBotClient:
             "通话ID": c.get("CallID") or "",
         }
 
+    def _call_record_groups(self) -> list[dict]:
+        """通话明细权限（llm_dialog_record）可见的项目组。"""
+        try:
+            body = self._request_json(
+                "GET", f"{BASE_URL}/console/api/v2/casbin/permission/groups",
+                params={"resource": "llm_dialog_record"},
+                referer=BOT_MGMT_REFERER, what="查询通话明细项目组")
+            data = unwrap(body, "查询通话明细项目组")
+            if isinstance(data, list) and data:
+                return data
+        except ApiError:
+            pass
+        return self.query_project_groups()
+
+    @staticmethod
+    def _is_fatal_api_error(exc: Exception) -> bool:
+        """登录失效 / 限流 / 服务端错误：不应继续枚举下一个剧本（C4）。"""
+        text = str(exc)
+        return any(k in text for k in (
+            "HTTP 401", "未登录", "HTTP 429", "HTTP 500", "HTTP 502",
+            "HTTP 503", "HTTP 504"))
+
+    def _group_script_ids(self, group_id: int,
+                          errors: list[str] | None = None) -> list[str]:
+        """项目组下的剧本ID列表（通话ID未指定剧本时逐个尝试 Schema）。
+
+        优先用通话明细页同源的 `casbin/permission/group/service`
+        （一次请求返回该组全部剧本，2026-11-03 从页面抓包确认），
+        失败再回退 `agent/list` 翻页。
+        """
+        try:
+            body = self._request_json(
+                "GET",
+                f"{BASE_URL}/console/api/v2/casbin/permission/group/service",
+                params={"group_id": group_id},
+                referer=(f"{BASE_URL}/aibot/call-detail-llm"
+                         f"?groupId={group_id}"),
+                what="查询项目组下的剧本")
+            data = unwrap(body, "查询项目组下的剧本")
+            if isinstance(data, list):
+                ids = [str(x.get("script_name")) for x in data
+                       if isinstance(x, dict) and x.get("script_name")]
+                if ids:
+                    return ids
+        except ApiError as e:
+            if self._is_fatal_api_error(e):
+                raise
+            if errors is not None:
+                errors.append(f"group={group_id} 剧本列表: {e}")
+        try:
+            scripts = self.list_group_all_scripts(group_id)
+        except ApiError as e:
+            if self._is_fatal_api_error(e):
+                raise
+            if errors is not None:
+                errors.append(f"group={group_id} agent/list: {e}")
+            return []
+        out: list[str] = []
+        for s in scripts:
+            sid = s.get("AgentID") or s.get("ServiceID")
+            if sid and sid not in out:
+                out.append(str(sid))
+        return out
+
+    def find_call_record(self, call_id: str,
+                         group_name: str | None = None,
+                         script_id: str | None = None) -> dict:
+        """按通话ID/SessionID 查询通话明细原始记录（2026-11-02）。
+
+        服务端 call_list 的 `Schema` **只接受具体剧本ID**：传 `"*"` 或
+        省略会被 `llm_dialog_record` 权限校验直接 403（2026-11-03 实测）。
+        因此：
+        - 传 script_id 时只查该剧本（最快，推荐）；
+        - 未传时枚举项目组下剧本逐个尝试；
+        - 单组/单剧本无权限只记录并继续，不中断整体查找。
+        """
+        call_id = str(call_id or "").strip()
+        if not call_id:
+            raise ApiError("通话ID不能为空")
+        if group_name:
+            groups = [self.find_group(group_name)]
+        elif script_id:
+            # 已知剧本ID时先按其所属项目组定位（少走无关组）
+            try:
+                groups = [{"id": self.resolve_script(script_id)["group"]}]
+            except ApiError:
+                groups = self._call_record_groups()
+        else:
+            groups = self._call_record_groups()
+        errors: list[str] = []
+        for g in groups:
+            gid = g.get("id")
+            if gid is None:
+                continue
+            schemas = ([script_id] if script_id
+                       else self._group_script_ids(gid, errors))
+            for schema in schemas:
+                payload = {
+                    "SearchID": call_id,
+                    "SearchType": "parent_or_session_id",
+                    "PageSize": 20,
+                    "PageStartIndex": 0,
+                    "Schema": schema,
+                }
+                try:
+                    body = self._request_json(
+                        "POST",
+                        f"{BASE_URL}/console/api/v2/llm/call_list",
+                        params={"group_id": gid}, payload=payload,
+                        referer=(f"{BASE_URL}/aibot/call-detail-llm"
+                                 f"?groupId={gid}&scriptName={schema}"),
+                        what="按通话ID查询通话明细")
+                except ApiError as e:
+                    # 登录失效/限流/服务端错误必须立即失败；
+                    # 仅权限/Schema/参数类不匹配才继续（C4）
+                    if self._is_fatal_api_error(e):
+                        raise
+                    errors.append(f"group={gid}, schema={schema}: {e}")
+                    continue
+                result = unwrap(body, "按通话ID查询通话明细") or {}
+                data = result.get("Data") or []
+                if data:
+                    return data[0]
+        detail = ("；最近错误: " + errors[-1]) if errors else ""
+        raise ApiError(
+            f"未找到通话记录: {call_id}（请确认通话ID正确；建议同时传 "
+            f"script_id 以直接定位剧本。也可用 query_call_records 按时间"
+            f"范围确认记录是否存在）{detail}")
+
+    def fetch_call_transcript(self, record: dict) -> dict:
+        """读取一条通话记录的对话 JSON（页面「查看详细」同源）。
+
+        `IsDataPruned=true` 表示页面操作为「数据已清除」，此时没有
+        SessionURL/对话数据，调用方应先跳过；本方法也做兜底校验。
+        对话 JSON 由 `/intranet/proxy/tos?tos_key=<SessionURL 文件名>`
+        返回（与页面一致，不经 TOS 公网地址）。
+        """
+        from .call_transcript import is_data_pruned
+        if is_data_pruned(record):
+            raise ApiError("通话数据已清除（页面操作为「数据已清除」，"
+                           "无法查看详细/获取通话文本）")
+        url = (record.get("SessionURL") or record.get("LogURL") or "").strip()
+        tos_key = url.rstrip("/").split("/")[-1] if url else ""
+        if not tos_key:
+            raise ApiError("通话记录缺少 SessionURL/LogURL，无法获取通话文本")
+        gid = record.get("GroupID") or ""
+        script = record.get("SchemaName") or ""
+        call_id = record.get("CallID") or ""
+        referer = (f"{BASE_URL}/aibot/call-detail-llm?groupId={gid}"
+                   f"&scriptName={script}&callId={call_id}")
+        body = self._request_json(
+            "GET", f"{BASE_URL}/console/api/v2/intranet/proxy/tos",
+            params={"tos_key": tos_key}, referer=referer,
+            what="获取通话文本")
+        if not isinstance(body, dict):
+            raise ApiError(f"通话文本返回结构异常: {str(body)[:200]}")
+        if not any(k in body for k in ("NlpParserWorker",
+                                       "dialog_series_by_time", "sessionConf")):
+            raise ApiError(f"通话文本内容异常（可能已清除）: {str(body)[:200]}")
+        return body
+
     # ---------------------------------------------------------------- 文本对话测试
 
     def talk(self, coords: dict, context_str: str, query: str,
@@ -1320,6 +2089,11 @@ class VolcAIBotClient:
         - 客户发言：query=客户话术，round_index 从 1 递增；
         - session_id 客户端生成（UUIDv4）整段对话复用；uuid 每轮新生成；
         - context 为“字符串化的 JSON”（双重序列化），键按字母排序。
+          context 语义（2026-10-11 副本剧本直连实测）：控制台发送全部变量
+          （前置传入=否的带默认值"无"）；**context 省略前置传入=否的变量
+          对话行为完全一致（无需提供）**；省略必填（前置传入=是）变量
+          **不报错但话术中该变量渲染为空**（静默降级）；空 context 也可
+          运行（全部变量渲染为空）——必填值校验在赋值环节而非 talk。
         返回响应中的 data（含 skill_results / rsp_ctx / debug_info）。
         """
         payload = {"data": {
@@ -1450,9 +2224,11 @@ class VolcAIBotClient:
         """GET /console/api/v2/llm/prompt_config?ServiceID={s}[&SubAgentID={id}]。
 
         注意：console 根路径接口（非 services 路径）、无 group_id 参数。
-        返回 Result：AgentMode（1=纯PE型 2=Multi Agents 3=对话流程编排，
-        抓包实证）、ModelType（LLM 模型名）及对应模式的提示词配置
-        （PromptConfig / MultiPromptConfig / PromptOnlyConfig）。
+        返回 Result：AgentMode（1=对话流程编排 2=纯PE型 3=Multi Agents，
+        2026-10-10 修正此前 1/2/3 错位，与 agent/list 数值一致）、
+        ModelType（LLM 模型名）及对应模式的提示词配置
+        （AgentMode=1→PromptConfig / 2→PromptOnlyConfig /
+        3→MultiPromptConfig）。
         带 SubAgentID 返回该 Sub Agent 的 ModelType 与提示词（约 60KB）。
         """
         coords = coords or self.resolve_script(script_id or "")
@@ -1759,6 +2535,27 @@ class VolcAIBotClient:
         answer_recognize_enabled = bool(ar.get("IsEnabled"))
         answer_recognize_text = str(ar.get("HangupText") or "")
 
+        # 剧本修改时间（agent/list 的 UpdateTime，ms）与发布判断
+        # （prompt 2026-10-12：修改时间<=线上版本发布时间=修改已随发布生效）
+        # ⚠ 60 秒容差（2026-10-12 全量样本实测）：发布动作本身会触碰
+        # 剧本 UpdateTime——刚发布完的剧本修改时间比线上发布时间晚
+        # +2~+7 秒（发布记录先写、保存后写）；改完再发布的正常流程为
+        # 修改早于线上发布完成 -75~-992 秒（发布测试→上线的流程耗时）；
+        # 真实未发布的修改 ≥ +2369 秒（39 分钟起）。即 ±1000 秒内均为
+        # "发布伴随触碰"，60 秒容差可完全覆盖正侧且远离真实未发布样本。
+        modify_ms = agent.get("UpdateTime")
+        modify_time = _fmt_ms_time(modify_ms)
+        online_dt = _parse_local_time(oi.get("update_time"))
+        modify_dt = _parse_ms_time(modify_ms)
+        if online_dt is not None and modify_dt is not None \
+                and modify_dt <= online_dt + datetime.timedelta(seconds=60):
+            modified_published = "是"
+        elif online_dt is not None and modify_dt is None:
+            modified_published = ""
+        else:
+            # 无线上版本发布时间（未上过线）或修改晚于线上发布：未发布
+            modified_published = "否"
+
         return {
             "project_group": groups.get(coords.get("group"), ""),
             "script_id": script_id,
@@ -1776,6 +2573,8 @@ class VolcAIBotClient:
                 "开启" if answer_recognize_enabled else "未开启",
             "answer_recognize_text": answer_recognize_text,
             "analysis_agents": {t: info for t, info in by_type.items()},
+            "modify_time": modify_time,
+            "modified_published": modified_published,
             "preview_publish": {
                 "version": ti.get("version"),
                 "update_time": ti.get("update_time"),

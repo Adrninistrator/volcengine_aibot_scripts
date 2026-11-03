@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""查询剧本变量：列出剧本的全部变量定义（名称/调用名称/类型/是否必填）。
+"""查询剧本变量：列出剧本的全部变量定义（含是否掩码并替换等全部属性）。
 
 接口：GET .../services/{s}/llm/global_variables?group_id={g}
-返回 Result.Variables[]：{id, name, key, IsRequired, VariableType}
-（全量无分页；注意抓包中无“变量描述”字段——该控制台弹窗不支持描述）
+返回 Result.Variables[]（全量无分页，三类剧本类型同口径）：
+{id, name, key, IsRequired, VariableType, Description, IsPreset, IsMasked,
+ MaskContent}（2026-10-10 晚起含 Description/IsPreset）
+- IsPreset=前置传入；⚠ 是否必填(IsRequired)受前置传入联动：IsPreset=false
+  时必填恒为 false（服务端对 IsRequired=true 且 IsPreset=false 的载荷
+  静默置回 false，控制台 UI 直接禁用必填下拉）；
+- IsMasked=是否掩码并替换，MaskContent=掩码替换文本，未设置过掩码文本的
+  变量无该字段；
+- Description=变量描述（控制台 2026-10-10 晚新增列，未设置时字段省略）。
 
 变量类型：1=String 2=Integer 3=Float 4=Boolean
 
@@ -44,12 +51,20 @@ def main() -> int:
     variables = client.query_variables(args.script_id)
 
     print(f"\n剧本 {args.script_id} 共 {len(variables)} 个变量：")
-    print(f"  {'调用名称(key)':<32} {'名称':<16} {'类型':<8} {'必填':<4} ID")
+    print(f"  {'调用名称(key)':<32} {'名称':<16} {'类型':<8} "
+          f"{'前置传入':<8} {'必填':<4} {'掩码':<4} ID")
     for v in variables:
         vtype = VARIABLE_TYPES.get(v.get("VariableType"), str(v.get("VariableType")))
         required = "是" if v.get("IsRequired") else "否"
+        preset = "是" if v.get("IsPreset") else "否"
+        masked = "是" if v.get("IsMasked") else "否"
         print(f"  {str(v.get('key')):<32} {str(v.get('name')):<16} "
-              f"{vtype:<8} {required:<4} {v.get('id')}")
+              f"{vtype:<8} {preset:<8} {required:<4} {masked:<4} {v.get('id')}")
+    descs = [v for v in variables if v.get("Description")]
+    if descs:
+        print("\n变量描述：")
+        for v in descs:
+            print(f"  {v.get('key')}: {v.get('Description')}")
 
     out_dir = new_result_dir("查询剧本变量")
     out = write_json(out_dir / "variables.json", {

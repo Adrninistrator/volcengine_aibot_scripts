@@ -29,7 +29,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from volc_aibot.client import VolcAIBotClient          # noqa: E402
+from volc_aibot.client import VolcAIBotClient, fmt_launch_time  # noqa: E402
 from volc_aibot.logging_util import setup_logging      # noqa: E402
 from volc_aibot.result import (new_result_dir,         # noqa: E402
                                safe_filename, write_json)
@@ -75,7 +75,12 @@ def render_info_md(info: dict) -> str:
         p = info.get(key) or {}
         lines.append("\t".join([label, str(p.get("version") or ""),
                                 str(p.get("status") or ""),
-                                str(p.get("update_time") or "")]))
+                                fmt_launch_time(p.get("update_time"))]))
+    lines.append("")
+    lines.append(f"- 剧本修改时间：{info.get('modify_time', '')}")
+    lines.append(f"- 修改后是否有发布：{info.get('modified_published', '')}"
+                 "（修改时间<=线上版本发布时间+60秒容差=是，"
+                 "含从未发布上线的剧本为否）")
     return "\n".join(lines) + "\n"
 
 

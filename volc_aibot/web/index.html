@@ -12,9 +12,15 @@
  header .logo { font-size: 17px; font-weight: 700; color: #1f3a5f; }
 header .logo .logo-sub { font-size: 15px; }
  header .status { font-size: 12px; color: #6b7280; }
- header .account-box { margin-left: auto; font-size: 13px; color: #374151;
+ header .account-box { margin-left: 12px; font-size: 13px; color: #374151;
                        display: flex; align-items: center; gap: 8px; }
  header .account-box b { color: #1f3a5f; }
+ /* 页面右上角：Cookie 来源切换（2026-11-02） */
+ header .cookie-source-box { margin-left: auto; font-size: 13px;
+                       color: #374151; display: flex; align-items: center;
+                       gap: 6px; }
+ header .cookie-source-box select { width: auto; max-width: 320px;
+                       padding: 4px 8px; font-size: 12.5px; }
  nav { background: #fff; border-bottom: 1px solid #ddd; padding: 0 12px;
        display: flex; }
  nav button { border: 0; background: none; padding: 12px 18px; cursor: pointer;
@@ -32,6 +38,45 @@ header .logo .logo-sub { font-size: 15px; }
  input[type=number], input[type=text] { width: 320px; }
  select { width: 100%; max-width: 900px; }
  .hint { color: #6b7280; font-size: 12.5px; margin-top: 4px; line-height: 1.7; }
+ /* 可搜索下拉框（prompt 2026-10-13：选项较多时输入关键字过滤） */
+ .ssel { position: relative; }
+ .ssel-box { border: 1px solid #d1d5db; border-radius: 6px; background: #fff;
+        padding: 8px 10px; display: flex; align-items: center;
+        justify-content: space-between; cursor: pointer; font-size: 14px;
+        min-height: 20px; box-sizing: content-box; }
+ .ssel-box:hover, .ssel-box.open { border-color: #2563eb; }
+ .ssel-text { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap;
+        text-overflow: ellipsis; }
+ .ssel-caret { color: #6b7280; margin-left: 8px; flex: none; }
+ .ssel-panel { display: none; position: absolute; top: calc(100% + 4px);
+        left: 0; right: 0; background: #fff; border: 1px solid #d1d5db;
+        border-radius: 6px; box-shadow: 0 6px 16px rgba(0,0,0,.14);
+        z-index: 60; flex-direction: column; max-height: 300px; overflow: hidden; }
+ .ssel-panel.open { display: flex; }
+ .ssel-search { margin: 8px; padding: 6px 10px; border: 1px solid #d1d5db;
+        border-radius: 4px; font-size: 13px; flex: none; width: calc(100% - 16px);
+        box-sizing: border-box; }
+ .ssel-list { overflow-y: auto; flex: 1; padding-bottom: 4px; }
+ .ssel-item { padding: 7px 12px; cursor: pointer; font-size: 13.5px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+ .ssel-item:hover, .ssel-item.active { background: #eef2f7; }
+ .ssel-empty { padding: 10px 12px; color: #6b7280; font-size: 13px; }
+ /* 发布确认码模态（prompt 2026-10-13：展示+复制+输入确认） */
+ .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.4);
+        z-index: 100; display: flex; align-items: center;
+        justify-content: center; }
+ .modal-box { background: #fff; border-radius: 8px; padding: 22px;
+        width: 440px; max-width: 92vw; box-shadow: 0 10px 30px rgba(0,0,0,.2); }
+ .modal-box h3 { margin: 0 0 10px; font-size: 16px; }
+ .modal-code-row { display: flex; align-items: center; gap: 8px;
+        margin: 12px 0; }
+ .modal-code { flex: 1; min-width: 0; font-family: Consolas, monospace;
+        font-size: 17px; font-weight: 600; background: #f3f4f6;
+        border: 1px dashed #9ca3af; border-radius: 6px; padding: 10px 12px;
+        user-select: all; overflow: hidden; white-space: nowrap;
+        text-overflow: ellipsis; }
+ .modal-box input { width: 100%; box-sizing: border-box; margin: 6px 0 14px; }
+ .modal-btns { display: flex; justify-content: flex-end; gap: 10px; }
  .url, code { font-family: Consolas, monospace; background: #f3f4f6;
         padding: 2px 6px; border-radius: 4px; word-break: break-all; }
  .url-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
@@ -41,6 +86,10 @@ header .logo .logo-sub { font-size: 15px; }
         white-space: nowrap; }
  button.copy:hover { background: #eff6ff; }
  .warn { color: #b45309; }
+ .danger-alert { display: block; background: #fef2f2; border: 1px solid #fca5a5;
+        border-left: 4px solid #dc2626; border-radius: 6px; padding: 10px 14px;
+        margin: 10px 0; color: #991b1b; font-size: 13.5px; font-weight: 600;
+        line-height: 1.8; }
  .alert { display: block; background: #fffbeb; border: 1px solid #fcd34d;
           color: #92400e; padding: 12px 20px; font-size: 13.5px;
           line-height: 1.8; }
@@ -136,6 +185,11 @@ header .logo .logo-sub { font-size: 15px; }
 <header>
   <span class="logo">AI外呼机器人智能分析工具<span class="logo-sub">（火山引擎）</span></span>
   <span class="status" id="headStatus">加载中…</span>
+  <span class="cookie-source-box" title="Cookie 获取来源；切换后实时生效">
+    Cookie 来源：
+    <select id="head-cookie-source" onchange="switchCookieSource(this.value)"></select>
+    <span id="head-cookie-source-msg" class="ok"></span>
+  </span>
   <span class="account-box">当前火山账号：
     <b id="head-account">未获取</b>
     <button class="copy" onclick="refreshAccount()">获取账号</button>
@@ -165,9 +219,12 @@ header .logo .logo-sub { font-size: 15px; }
     <nav class="usage-toc" id="quick-list">
       <div class="toc-title">快捷工具</div>
       <a class="active" data-tool="query" onclick="quickTool('query')">批量查询剧本信息</a>
+      <a data-tool="variables" onclick="quickTool('variables')">批量查询剧本变量</a>
       <a data-tool="search" onclick="quickTool('search')">批量搜索剧本内容</a>
       <a data-tool="agents" onclick="quickTool('agents')">批量下载搜索分析Agent</a>
       <a data-tool="delete" onclick="quickTool('delete')">批量删除剧本</a>
+      <a data-tool="maskbatch" onclick="quickTool('maskbatch')">批量修改变量掩码设置</a>
+      <a data-tool="publishbatch" onclick="quickTool('publishbatch')">批量发布剧本</a>
     </nav>
     <div class="quick-body">
 
@@ -202,11 +259,63 @@ header .logo .logo-sub { font-size: 15px; }
           <option value="8">8</option>
           <option value="10">10</option>
         </select>
-        <div style="margin-top:12px">
+        <label style="margin-top:10px">剧本ID（可选；多个以半角,分隔，如 llm_xxx,llm_yyy；空=所选范围全部剧本）</label>
+        <input id="q-ids" type="text" placeholder="llm_xxx,llm_yyy（空=全部剧本）"
+               style="max-width:480px;width:480px">
+        <div style="margin-top:12px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
           <button class="primary" id="q-btn" onclick="quickQuery()">查询</button>
-          <span id="q-msg" class="ok"></span>
+          <button class="primary" id="qu-btn" onclick="quickQueryUnpublished()">查询修改后未发布</button>
         </div>
+        <div class="hint" style="margin-top:4px">「查询修改后未发布」：查询所选项目组（支持全部项目组）中
+          剧本修改时间晚于线上版本发布时间的剧本（修改后未发布，含从未发布上线的
+          剧本）；查询结果只需基本的项目、剧本信息（项目组/剧本ID/剧本名称/剧本类型）
+          与剧本修改时间、测试版本发布时间、线上版本发布时间、修改后是否有发布，
+          表格展示并支持导出Excel。</div>
+        <div><span id="q-msg" class="ok"></span><span id="qu-msg" class="ok"></span></div>
         <div id="q-result"></div>
+      </div>
+
+      <div class="card" id="quick-panel-variables" style="display:none">
+        <h1>批量查询剧本变量</h1>
+        <div class="hint">查询剧本的全局变量定义（变量名称/调用名称/变量类型/
+          前置传入/是否必填/变量描述/是否掩码并替换/掩码替换文本）。
+          前置传入与是否必填联动：前置传入为否时必填恒为否。
+          选择某个剧本时
+          在页面展示变量信息，也提供导出Excel；选择「（全部剧本）」时变量
+          数量较多，不在页面展示，仅提供导出Excel。</div>
+        <label>项目组范围</label>
+        <select id="v-group" style="max-width:360px;width:360px"
+                onchange="loadVScripts()">
+          <option value="">（全部项目组）</option>
+        </select>
+        <label style="margin-top:10px">剧本（先选项目组再选剧本；选择「（全部剧本）」导出所选范围全部剧本的变量）</label>
+        <select id="v-script" style="max-width:600px;width:600px">
+          <option value="">（全部剧本）</option>
+        </select>
+        <label style="margin-top:10px">并发数（选择全部剧本时并行查询各剧本变量；默认 5，实测提速约 3.7 倍且无错误，过大有服务端频控风险）</label>
+        <select id="v-concurrency" style="max-width:160px;width:160px">
+          <option value="1">1（串行）</option>
+          <option value="3">3</option>
+          <option value="5" selected>5（默认）</option>
+          <option value="8">8</option>
+          <option value="10">10</option>
+        </select>
+        <label style="margin-top:10px">剧本ID（可选；多个以半角,分隔；填写后优先于上方剧本下拉，空=按上方选择）</label>
+        <input id="v-ids" type="text" placeholder="llm_xxx,llm_yyy（空=按上方剧本选择）"
+               style="max-width:480px;width:480px">
+        <div style="margin-top:12px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+          <button class="primary" id="v-btn" onclick="quickQueryVariables()">查询</button>
+          <button class="primary" id="uv-btn" onclick="quickQueryUnmaskedVars()">查询未掩码的字段</button>
+        </div>
+        <div class="hint" style="margin-top:6px">「查询未掩码的字段」：查询范围同上（项目组/剧本ID或下拉/并发数）：只检查范围内
+          前置传入为是的变量，查出未开启"是否掩码并替换"的变量，或掩码替换文本不满足要求的
+          变量（掩码后的名称需要是变量名称仅保留中文+英文+数字的结果；掩码文本不一致、
+          变量名称清洗后为空均算不满足；非前置传入变量不检查）。
+          结果含剧本基本信息（项目组/剧本ID/剧本名称/剧本类型）与变量详细信息
+          （含问题原因），页面展示并支持导出Excel；全部合规时显示查询统计。</div>
+        <div><span id="v-msg" class="ok"></span><span id="uv-msg" class="ok"></span></div>
+        <div id="v-result"></div>
+        <div id="uv-result"></div>
       </div>
 
       <div class="card" id="quick-panel-search" style="display:none">
@@ -317,6 +426,67 @@ header .logo .logo-sub { font-size: 15px; }
         </div>
       </div>
 
+      <div class="card" id="quick-panel-maskbatch" style="display:none">
+        <h1>批量修改变量掩码设置</h1>
+        <div class="hint">针对全部或指定项目组、全部或指定剧本，将对应剧本的
+          全部变量开启"是否掩码并替换"开关，掩码替换文本为变量名称仅保留
+          中文、英文、数字的结果（名称中的下划线、括号等其他字符自动去除）；
+          已开启且掩码文本一致的变量自动跳过（幂等）。⚠ 串行逐剧本执行
+          （不并行），剧本较多时耗时相应增加；修改只保存为草稿，
+          不自动发布（发布为独立操作，见「批量发布剧本」）。</div>
+        <label>项目组范围</label>
+        <select id="mb-group" style="max-width:360px;width:360px"
+                onchange="loadMScripts()">
+          <option value="">（全部项目组）</option>
+        </select>
+        <label style="margin-top:10px">剧本（先选项目组再选剧本；选择「（全部剧本）」处理所选范围内全部剧本）</label>
+        <select id="mb-script" style="max-width:600px;width:600px">
+          <option value="">（全部剧本）</option>
+        </select>
+        <label style="margin-top:10px">剧本ID（可选；多个以半角,分隔；填写后优先于上方剧本下拉，空=按上方选择）</label>
+        <input id="mb-ids" type="text" placeholder="llm_xxx,llm_yyy（空=按上方剧本选择）"
+               style="max-width:480px;width:480px">
+        <div style="margin-top:12px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+          <button class="primary" id="mb-btn" onclick="batchMaskRun()">开启全部变量掩码</button>
+          <span id="mb-msg" class="ok"></span>
+        </div>
+        <div id="mb-result"></div>
+      </div>
+
+      <div class="card" id="quick-panel-publishbatch" style="display:none">
+        <h1>批量发布剧本</h1>
+        <div class="danger-alert">⚠⚠ 发布上线会影响正在进行中的通话（通话中机器人使用的版本被切换）——
+          必须在剧本没有通话的时间段执行发布「发布测试+线上版本」，
+          发布前请先确认所选范围内剧本当前无进行中的通话。</div>
+        <div class="hint">针对全部或指定项目组、全部或指定剧本执行批量发布
+          （⚠ 串行逐剧本执行不并行，逐剧本发布并轮询至完成后处理下一个）。
+          「发布测试版本」仅发布各剧本的测试版本；「发布测试+线上版本」
+          先发布测试版本再发布上线——发布上线属于修改操作，受配置参数
+          「是否允许执行修改操作」与「允许执行修改操作的账号」控制，
+          且点击后需要输入确认码（页面会显示当前登录用户名加随机6位数字
+          的确认码，照原文输入以确认，防止误操作；每次点击按钮都会生成
+          新的随机确认码，旧码即刻失效、确认码一次性使用不可复用）。⚠ 发布上线为生产变更，
+          请谨慎选择范围（建议先在测试项目组验证）。</div>
+        <label>项目组范围</label>
+        <select id="bp-group" style="max-width:360px;width:360px"
+                onchange="loadPScripts()">
+          <option value="">（全部项目组）</option>
+        </select>
+        <label style="margin-top:10px">剧本（先选项目组再选剧本；选择「（全部剧本）」发布所选范围内全部剧本）</label>
+        <select id="bp-script" style="max-width:600px;width:600px">
+          <option value="">（全部剧本）</option>
+        </select>
+        <label style="margin-top:10px">剧本ID（可选；多个以半角,分隔；填写后优先于上方剧本下拉，空=按上方选择）</label>
+        <input id="bp-ids" type="text" placeholder="llm_xxx,llm_yyy（空=按上方剧本选择）"
+               style="max-width:480px;width:480px">
+        <div style="margin-top:12px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+          <button class="primary" id="bp-test-btn" onclick="batchPublishRun('preview')">发布测试版本</button>
+          <button class="primary" id="bp-online-btn" onclick="batchPublishAskOnline()">发布测试+线上版本</button>
+          <span id="bp-msg" class="ok"></span>
+        </div>
+        <div id="bp-result"></div>
+      </div>
+
     </div>
   </div>
 </div>
@@ -396,6 +566,33 @@ header .logo .logo-sub { font-size: 15px; }
 
     <div id="autostart-migrate" class="alert" style="display:none"></div>
 
+    <h2>Cookie 获取来源</h2>
+    <div class="hint">
+      本工具通过 chrome_capture_operate 获取火山引擎 Cookie。可配置多个来源：
+      <b>日常 Chrome 插件</b>按插件推送的 Chrome 实例编号（profile）读取；
+      <b>CDP Chrome</b>按抓包 Chrome 的调试端口实时读取（端口需为抓包端口或
+      已在 chrome_capture_operate 登记的 CDP 实例端口）。<br>
+      默认来源（日常 Chrome，profile 0）<b>不可修改或删除</b>；只有勾选
+      「允许使用」的来源才会出现在页面右上角的切换框。点下方「保存」后生效，
+      右上角切换当前来源后<b>实时生效</b>（下一次取 Cookie 即使用新来源）。
+    </div>
+    <table id="cookie-src-table">
+      <thead><tr><th>来源名称</th><th>类型</th><th>profile / 端口</th>
+        <th>允许使用</th><th>操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="url-row" style="margin-top:10px;flex-wrap:wrap">
+      <select id="cs-type" style="width:250px">
+        <option value="extension">日常 Chrome 插件（profile ID）</option>
+        <option value="cdp">CDP Chrome（调试端口）</option>
+      </select>
+      <input id="cs-value" type="number" min="0"
+             placeholder="profile ID / 端口" style="width:170px">
+      <input id="cs-name" type="text" placeholder="名称（可选）" style="width:220px">
+      <button onclick="addCookieSource()">添加来源</button>
+      <span id="cs-msg" class="ok"></span>
+    </div>
+
     <button class="primary" onclick="save()">保存</button>
     <span id="msg" class="ok"></span>
 
@@ -460,13 +657,23 @@ document.querySelectorAll('nav button[data-tab]').forEach(btn => {
 });
 
 /* ---------- 配置参数 ---------- */
+let COOKIE_SOURCES = [];
+let COOKIE_CURRENT = 'default';
+let COOKIE_SOURCES_LOADED = false;   // 配置未成功加载时不提交来源列表，防止误删
+
 async function loadConfig() {
+  COOKIE_SOURCES_LOADED = false;   // 加载失败/字段缺失时禁止提交来源列表
   const r = await fetch('/api/config');
   const c = await r.json();
   document.getElementById('port').value = c.server_port;
   document.getElementById('account').value = c.allowed_account;
   document.getElementById('allowMutation').checked = !!c.allow_mutation;
   document.getElementById('autostart').checked = !!c.autostart;
+  COOKIE_SOURCES = Array.isArray(c.cookie_sources) ? c.cookie_sources : [];
+  COOKIE_CURRENT = c.cookie_source_current || 'default';
+  COOKIE_SOURCES_LOADED = Array.isArray(c.cookie_sources);
+  renderCookieSources();
+  renderCookieSourceHeader();
   // 自启动指向其他目录（项目拷贝/迁移未跟随）时提示迁移
   const mig = document.getElementById('autostart-migrate');
   if (!c.autostart && (c.autostart_other || []).length) {
@@ -486,6 +693,125 @@ async function loadConfig() {
       (c.allowed_account ? '允许账号 ' + c.allowed_account
                          : '未配置允许账号');
   bindCopyButtons(c.server_port);
+}
+
+/* ---------- Cookie 获取来源（2026-11-02） ---------- */
+function cookieSourceTypeName(s) {
+  return s.type === 'cdp' ? 'CDP Chrome（实时）' : '日常 Chrome（插件）';
+}
+function cookieSourceValueText(s) {
+  return s.type === 'cdp' ? ('端口 ' + s.port) : ('profile ' + s.profile);
+}
+function cookieSourceEnabled() {
+  return COOKIE_SOURCES.filter(s => s.enabled);
+}
+function renderCookieSourceHeader() {
+  const sel = document.getElementById('head-cookie-source');
+  const enabled = cookieSourceEnabled();
+  sel.innerHTML = enabled.map(s =>
+    '<option value="' + esc(s.id) + '">' + esc(s.name) + '</option>').join('');
+  if (enabled.some(s => s.id === COOKIE_CURRENT)) {
+    sel.value = COOKIE_CURRENT;
+  } else if (enabled.length) {
+    sel.value = enabled[0].id;
+  }
+}
+function renderCookieSources() {
+  const tb = document.querySelector('#cookie-src-table tbody');
+  if (!tb) return;
+  tb.innerHTML = COOKIE_SOURCES.map((s, i) => {
+    const fixed = !!s.fixed;
+    const nameCell = fixed ? esc(s.name) :
+      '<input type="text" value="' + esc(s.name) +
+      '" style="width:200px" onchange="editCookieSource(' + i +
+      ',\'name\',this.value)">';
+    const valueCell = fixed ? esc(cookieSourceValueText(s)) :
+      (s.type === 'cdp'
+        ? '<input type="number" min="1024" max="65535" value="' + s.port +
+          '" style="width:120px" onchange="editCookieSource(' + i +
+          ',\'port\',this.value)">'
+        : '<input type="number" min="0" value="' + s.profile +
+          '" style="width:120px" onchange="editCookieSource(' + i +
+          ',\'profile\',this.value)">');
+    const enabledCell = '<input type="checkbox" ' +
+      (s.enabled ? 'checked' : '') + (fixed ? ' disabled' : '') +
+      ' onchange="editCookieSource(' + i + ',\'enabled\',this.checked)">';
+    const opCell = fixed ? '默认来源（不可修改/删除）' :
+      '<button onclick="removeCookieSource(' + i + ')">删除</button>';
+    return '<tr><td>' + nameCell + '</td><td>' + esc(cookieSourceTypeName(s)) +
+      '</td><td>' + valueCell + '</td><td>' + enabledCell + '</td><td>' +
+      opCell + '</td></tr>';
+  }).join('');
+}
+function editCookieSource(i, key, value) {
+  const s = COOKIE_SOURCES[i];
+  if (!s) return;
+  if (key === 'enabled') {
+    s.enabled = !!value;
+  } else if (key === 'name') {
+    s.name = String(value || '').trim();
+    if (!s.name) {
+      alert('来源名称不能为空');
+      renderCookieSources();
+      return;
+    }
+  } else if (key === 'profile') {
+    const n = parseInt(value, 10);
+    if (!(n >= 0)) { alert('profile 需为 >=0 的整数'); renderCookieSources(); return; }
+    s.profile = n;
+  } else if (key === 'port') {
+    const n = parseInt(value, 10);
+    if (!(n >= 1024 && n <= 65535)) {
+      alert('CDP 端口需为 1024~65535'); renderCookieSources(); return;
+    }
+    s.port = n;
+  }
+  renderCookieSources();
+}
+function addCookieSource() {
+  const type = document.getElementById('cs-type').value;
+  const raw = document.getElementById('cs-value').value.trim();
+  const name = document.getElementById('cs-name').value.trim();
+  const n = parseInt(raw, 10);
+  if (!raw || Number.isNaN(n)) { alert('请填写 profile ID 或 CDP 端口'); return; }
+  if (type === 'cdp' && !(n >= 1024 && n <= 65535)) {
+    alert('CDP 端口需为 1024~65535'); return;
+  }
+  if (type === 'extension' && n < 0) { alert('profile 需为 >=0 的整数'); return; }
+  const s = {id: '', name: name, type: type, enabled: true, fixed: false};
+  s[type === 'cdp' ? 'port' : 'profile'] = n;
+  COOKIE_SOURCES.push(s);
+  document.getElementById('cs-value').value = '';
+  document.getElementById('cs-name').value = '';
+  const msg = document.getElementById('cs-msg');
+  msg.textContent = '已添加，点「保存」生效';
+  setTimeout(() => msg.textContent = '', 3000);
+  renderCookieSources();
+}
+function removeCookieSource(i) {
+  const s = COOKIE_SOURCES[i];
+  if (!s || s.fixed) return;
+  COOKIE_SOURCES.splice(i, 1);
+  renderCookieSources();
+}
+async function switchCookieSource(id) {
+  const msg = document.getElementById('head-cookie-source-msg');
+  try {
+    const r = await fetch('/api/cookie-source', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({id: id})
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    if (d.error) throw new Error(d.error);
+    COOKIE_CURRENT = d.cookie_source_current;
+    document.getElementById('head-cookie-source').value = COOKIE_CURRENT;
+    msg.textContent = '已切换，实时生效';
+    setTimeout(() => msg.textContent = '', 2500);
+  } catch (e) {
+    msg.textContent = '切换失败: ' + (e && e.message ? e.message : e);
+    renderCookieSourceHeader();   // 失败时恢复为服务端当前值
+  }
 }
 
 /* ---------- 复制按钮（SSE URL / Claude 全局安装命令） ---------- */
@@ -538,13 +864,16 @@ async function save() {
   if (account && !/^\d+$/.test(account)) {
       alert('账号应为数字（账号ID）'); return;
   }
+  const payload = {
+    server_port: port,
+    allowed_account: account,
+    allow_mutation: document.getElementById('allowMutation').checked
+  };
+  // Cookie 来源（默认来源由服务端强制保留，不可改删）；加载成功才提交
+  if (COOKIE_SOURCES_LOADED) payload.cookie_sources = COOKIE_SOURCES;
   const r = await fetch('/api/config', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        server_port: port,
-        allowed_account: account,
-        allow_mutation: document.getElementById('allowMutation').checked
-      })
+      body: JSON.stringify(payload)
   });
   const c = await r.json();
   if (c.error) { alert(c.error); return; }
@@ -741,6 +1070,9 @@ const PANELS = {
   query: { label: '批量查询剧本信息',
            inFlight: new Map(), stage: null, stageTs: 0, done: null,
            maxIdx: 0, total: 0, history: [] },
+  variables: { label: '批量查询剧本变量',
+               inFlight: new Map(), stage: null, stageTs: 0, done: null,
+               maxIdx: 0, total: 0, history: [] },
   export: { label: '批量搜索剧本内容',
             inFlight: new Map(), stage: null, stageTs: 0, done: null,
             maxIdx: 0, total: 0, history: [] },
@@ -749,7 +1081,13 @@ const PANELS = {
             maxIdx: 0, total: 0, history: [] },
   delete: { label: '批量删除剧本',
             inFlight: new Map(), stage: null, stageTs: 0, done: null,
-            maxIdx: 0, total: 0, history: [] }
+            maxIdx: 0, total: 0, history: [] },
+  maskbatch: { label: '批量修改变量掩码设置',
+               inFlight: new Map(), stage: null, stageTs: 0, done: null,
+               maxIdx: 0, total: 0, history: [] },
+  publishbatch: { label: '批量发布剧本',
+                  inFlight: new Map(), stage: null, stageTs: 0, done: null,
+                  maxIdx: 0, total: 0, history: [] }
 };
 let curTool = 'query';          // 当前展示的工具数据源
 let progExpanded = false;       // 折叠状态（默认收起：仅进度条）
@@ -780,9 +1118,12 @@ function scheduleWs() {
 }
 function panelFor(source) {
   if (source === 'query') return PANELS.query;
+  if (source === 'variables') return PANELS.variables;
   if (source === 'export' || source === 'search') return PANELS.export;
   if (source === 'agents') return PANELS.agents;
   if (source === 'delete') return PANELS.delete;
+  if (source === 'maskbatch') return PANELS.maskbatch;
+  if (source === 'publishbatch') return PANELS.publishbatch;
   return null;   // 无来源事件不进入快捷工具面板
 }
 function renderProgressEvent(d) {
@@ -913,12 +1254,17 @@ setInterval(renderPanel, 500);
 function quickTool(name) {
   document.querySelectorAll('#quick-list a').forEach(a =>
     a.classList.toggle('active', a.dataset.tool === name));
-  for (const t of ['query', 'search', 'agents', 'delete']) {
+  for (const t of ['query', 'variables', 'search', 'agents', 'delete',
+                   'maskbatch', 'publishbatch']) {
     document.getElementById('quick-panel-' + t).style.display =
         t === name ? '' : 'none';
   }
   // 上方共享面板切换为当前工具的数据源
   curTool = (name === 'search') ? 'export' : name;
+  // 变量查询页首次打开时加载剧本下拉（懒加载，避免页面启动多请求）
+  if (name === 'variables' && !vScriptsLoaded) loadVScripts();
+  if (name === 'maskbatch' && !mScriptsLoaded) loadMScripts();
+  if (name === 'publishbatch' && !pScriptsLoaded) loadPScripts();
   renderPanel();
 }
 
@@ -931,7 +1277,7 @@ async function loadGroups() {
       // 后端错误文案已含面向非技术人员的排查指引，第一行是摘要，
       // 完整内容鼠标悬停查看
       const first = String(d.error).split('\n')[0];
-      for (const sel of ['q-group', 's-group', 'd-group']) {
+      for (const sel of ['q-group', 'v-group', 's-group', 'd-group', 'mb-group', 'bp-group']) {
         document.getElementById(sel).innerHTML =
           '<option value="" title="' + esc(d.error) + '">' +
           '（项目组加载失败: ' + esc(first) +
@@ -939,7 +1285,7 @@ async function loadGroups() {
       }
       return;
     }
-    for (const sel of ['q-group', 's-group', 'd-group']) {
+    for (const sel of ['q-group', 'v-group', 's-group', 'd-group', 'mb-group', 'bp-group']) {
       const el = document.getElementById(sel);
       const cur = el.value;
       el.innerHTML = '<option value="">（全部项目组）</option>' +
@@ -949,6 +1295,134 @@ async function loadGroups() {
       if (cur) el.value = cur;
     }
   } catch (e) { /* 静默：切到快捷工具页时再试 */ }
+}
+
+/* ---------- 剧本ID输入框（prompt 2026-10-13：一个或多个剧本ID，
+   半角,分隔；填写后优先于剧本下拉选择） ---------- */
+function scriptIdFor(prefix) {
+  const idsEl = document.getElementById(prefix + '-ids');
+  const ids = (idsEl && idsEl.value || '').trim();
+  if (ids) return ids;
+  const sel = document.getElementById(prefix + '-script');
+  return sel ? sel.value : '';
+}
+
+/* ---------- 可搜索下拉框（prompt 2026-10-13：输入关键字过滤选项） ----------
+   原生 <select> 保留在 DOM 中（display:none）作为取值存储——现有代码的
+   .value 读取 / onchange 处理 / innerHTML 选项装载完全不变；组件在其后
+   渲染：显示框 + 下拉面板（搜索框 + 过滤后的选项列表）。选项 < 8 个时
+   不显示搜索框。 */
+const SSEL_SEARCH_MIN = 8;
+
+function makeSearchable(sel) {
+  if (!sel || sel.dataset.sselInit) return;
+  sel.dataset.sselInit = '1';
+  // 复制原下拉框宽度到组件容器
+  const wrap = document.createElement('div');
+  wrap.className = 'ssel';
+  if (sel.style.width) wrap.style.width = sel.style.width;
+  if (sel.style.maxWidth) wrap.style.maxWidth = sel.style.maxWidth;
+  sel.style.display = 'none';
+  sel.parentElement.insertBefore(wrap, sel.nextSibling);
+
+  const box = document.createElement('div');
+  box.className = 'ssel-box';
+  box.innerHTML = '<span class="ssel-text"></span>' +
+      '<span class="ssel-caret">▾</span>';
+  const panel = document.createElement('div');
+  panel.className = 'ssel-panel';
+  const search = document.createElement('input');
+  search.className = 'ssel-search';
+  search.placeholder = '输入关键字过滤选项…';
+  const list = document.createElement('div');
+  list.className = 'ssel-list';
+  panel.appendChild(search);
+  panel.appendChild(list);
+  wrap.appendChild(box);
+  wrap.appendChild(panel);
+
+  const text = () => (sel.selectedOptions[0] || {textContent: ''}).textContent.trim();
+  const syncBox = () => { box.querySelector('.ssel-text').textContent = text(); };
+  syncBox();
+  // 选项被装载器整体替换（innerHTML）或选择变化时同步显示框
+  new MutationObserver(syncBox).observe(sel, {childList: true});
+  sel.addEventListener('change', syncBox);
+
+  let activeIdx = -1;
+
+  function renderList() {
+    const kw = search.value.trim().toLowerCase();
+    const opts = [...sel.options];
+    search.style.display = opts.length >= SSEL_SEARCH_MIN ? '' : 'none';
+    const hits = opts.filter(o =>
+        !kw || o.textContent.toLowerCase().includes(kw) ||
+        (o.value || '').toLowerCase().includes(kw));
+    list.innerHTML = hits.length
+        ? hits.map(o => '<div class="ssel-item" data-val="' + esc(o.value) +
+            '" title="' + esc(o.textContent) + '">' + esc(o.textContent) + '</div>').join('')
+        : '<div class="ssel-empty">无匹配选项</div>';
+    activeIdx = -1;
+  }
+
+  function setActive(idx) {
+    const items = [...list.querySelectorAll('.ssel-item')];
+    if (!items.length) return;
+    activeIdx = (idx + items.length) % items.length;
+    items.forEach((it, i) => it.classList.toggle('active', i === activeIdx));
+    items[activeIdx].scrollIntoView({block: 'nearest'});
+  }
+
+  function pick(val) {
+    sel.value = val;
+    sel.dispatchEvent(new Event('change', {bubbles: true}));
+    syncBox();
+    close();
+  }
+
+  function open() {
+    renderList();
+    search.value = '';
+    panel.classList.add('open');
+    box.classList.add('open');
+    if (search.style.display !== 'none') search.focus();
+  }
+  function close() {
+    panel.classList.remove('open');
+    box.classList.remove('open');
+  }
+
+  box.onclick = (e) => {
+    e.stopPropagation();
+    panel.classList.contains('open') ? close() : open();
+  };
+  search.oninput = renderList;
+  search.onkeydown = (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive(activeIdx + 1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(activeIdx - 1); }
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      const items = [...list.querySelectorAll('.ssel-item')];
+      if (activeIdx >= 0 && items[activeIdx]) pick(items[activeIdx].dataset.val);
+    } else if (e.key === 'Escape') { close(); }
+  };
+  list.onclick = (e) => {
+    const item = e.target.closest('.ssel-item');
+    if (item) pick(item.dataset.val);
+  };
+  // 点击组件外部关闭（挂 document，打开时才判断）
+  document.addEventListener('click', (e) => {
+    if (panel.classList.contains('open') && !wrap.contains(e.target)) close();
+  });
+}
+
+function initSearchableSelects() {
+  // 项目组/剧本等数据下拉框 + MCP 工具选择（并发数等少量固定选项不启用）
+  for (const id of ['q-group', 'v-group', 's-group', 'd-group',
+                    'mb-group', 'bp-group', 'v-script', 'mb-script',
+                    'bp-script', 'toolSelect']) {
+    const sel = document.getElementById(id);
+    if (sel) makeSearchable(sel);
+  }
 }
 
 function busy(btnId, msgId, text) {
@@ -980,7 +1454,9 @@ async function quickQuery() {
     const concurrency = document.getElementById('q-concurrency').value;
     const r = await fetch('/api/quick/query_scripts', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({group: group, concurrency: concurrency})
+      body: JSON.stringify({group: group,
+                             script_id: scriptIdFor('q'),
+                             concurrency: concurrency})
     });
     const d = await r.json();
     if (d.error) { idle('q-btn', 'q-msg', '', '失败: ' + d.error); return; }
@@ -988,6 +1464,293 @@ async function quickQuery() {
     idle('q-btn', 'q-msg', '共 ' + d.total + ' 个剧本' +
         (d.errors ? '，' + d.errors + ' 个失败' : ''));
   } catch (e) { idle('q-btn', 'q-msg', '', '请求失败: ' + e); }
+}
+
+/* 2026-10-12 新增：单独查询修改后未发布的剧本（全量查询后过滤
+   "修改后是否有发布"=否 的行，含从未发布上线的剧本） */
+async function quickQueryUnpublished() {
+  busy('qu-btn', 'qu-msg', '查询中…（剧本较多时需等待）');
+  try {
+    const group = document.getElementById('q-group').value;
+    const concurrency = document.getElementById('q-concurrency').value;
+    const r = await fetch('/api/quick/query_unpublished', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({group: group,
+                             script_id: scriptIdFor('q'),
+                             concurrency: concurrency})
+    });
+    const d = await r.json();
+    if (d.error) { idle('qu-btn', 'qu-msg', '', '失败: ' + d.error); return; }
+    if (d.rows && d.rows.length) {
+      renderQuickTable('q-result', d.headers, d.rows, '修改后未发布的剧本');
+    } else {
+      document.getElementById('q-result').innerHTML =
+        '<div class="hint" style="margin-top:12px">所选范围内没有修改后未发布的剧本'
+        + '（检查 ' + (d.total_all != null ? d.total_all : d.total) + ' 个剧本）。</div>';
+    }
+    idle('qu-btn', 'qu-msg', '共 ' + d.total + ' 个修改后未发布' +
+        '（检查 ' + (d.total_all != null ? d.total_all : d.total) + ' 个）' +
+        (d.errors ? '，' + d.errors + ' 个失败' : ''));
+  } catch (e) { idle('qu-btn', 'qu-msg', '', '请求失败: ' + e); }
+}
+
+/* ---------- 批量查询剧本变量 ---------- */
+let vScriptsLoaded = false;
+async function loadVScripts() {
+  const el = document.getElementById('v-script');
+  const group = document.getElementById('v-group').value;
+  el.innerHTML = '<option value="">（剧本加载中…）</option>';
+  try {
+    const r = await fetch('/api/quick/group_scripts', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({group: group})
+    });
+    const d = await r.json();
+    vScriptsLoaded = true;
+    if (d.error) {
+      const first = String(d.error).split('\n')[0];
+      el.innerHTML = '<option value="" title="' + esc(d.error) + '">' +
+          '（剧本加载失败: ' + esc(first) + '，鼠标悬停查看原因）</option>';
+      return;
+    }
+    el.innerHTML = '<option value="">（全部剧本）</option>' +
+        (d.scripts || []).map(s =>
+          '<option value="' + esc(s.script_id) + '">' +
+          esc(s.script_name) + '（' + esc(s.agent_mode) + '）' +
+          esc(s.script_id) + '</option>').join('');
+  } catch (e) {
+    el.innerHTML = '<option value="">（剧本加载失败: ' + esc(e) + '）</option>';
+  }
+}
+
+async function quickQueryVariables() {
+  busy('v-btn', 'v-msg', '查询中…（选择全部剧本时需等待）');
+  document.getElementById('v-result').innerHTML = '';
+  try {
+    const single = !!document.getElementById('v-script').value;
+    const r = await fetch('/api/quick/query_variables', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        group: document.getElementById('v-group').value,
+        script_id: scriptIdFor('v'),
+        concurrency: document.getElementById('v-concurrency').value
+      })
+    });
+    const d = await r.json();
+    if (d.error) { idle('v-btn', 'v-msg', '', '失败: ' + d.error); return; }
+    if (single) {
+      // 选择某个剧本：页面展示变量信息，也提供导出Excel
+      renderQuickTable('v-result', d.headers, d.rows, '批量查询剧本变量');
+    } else {
+      // 选择全部剧本：不在页面展示，仅提供导出Excel
+      renderVariablesExportOnly('v-result', d, '批量查询剧本变量');
+    }
+    idle('v-btn', 'v-msg', '共 ' + d.total + ' 个剧本 ' +
+        (d.variables != null ? d.variables : d.rows.length) + ' 个变量' +
+        (d.errors ? '，' + d.errors + ' 个剧本失败' : ''));
+  } catch (e) { idle('v-btn', 'v-msg', '', '请求失败: ' + e); }
+}
+
+/* 2026-10-13 新增：查询未掩码/掩码不合规的变量（范围/并发数复用上方选择） */
+async function quickQueryUnmaskedVars() {
+  busy('uv-btn', 'uv-msg', '查询中…（选择全部剧本时需等待）');
+  document.getElementById('uv-result').innerHTML = '';
+  try {
+    const r = await fetch('/api/quick/query_unmasked_vars', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        group: document.getElementById('v-group').value,
+        script_id: scriptIdFor('v'),
+        concurrency: document.getElementById('v-concurrency').value
+      })
+    });
+    const d = await r.json();
+    if (d.error) { idle('uv-btn', 'uv-msg', '', '失败: ' + d.error); return; }
+    if (d.rows && d.rows.length) {
+      renderQuickTable('uv-result', d.headers, d.rows, '未掩码及掩码不合规变量');
+      idle('uv-btn', 'uv-msg', '共查询 ' + d.scripts + ' 个剧本 ' +
+          d.variables + ' 个变量，' + d.total + ' 个不合规' +
+          (d.errors ? '，' + d.errors + ' 个剧本查询失败' : ''));
+    } else {
+      document.getElementById('uv-result').innerHTML =
+        '<div class="hint" style="margin-top:12px">全部变量掩码均合规' +
+        '（已开启掩码且掩码文本为变量名称清洗结果），无不合规明细。</div>';
+      idle('uv-btn', 'uv-msg', '共查询 ' + d.scripts + ' 个剧本 ' +
+          d.variables + ' 个变量，全部合规' +
+          (d.errors ? '，' + d.errors + ' 个剧本查询失败' : ''));
+    }
+  } catch (e) { idle('uv-btn', 'uv-msg', '', '请求失败: ' + e); }
+}
+
+function renderVariablesExportOnly(containerId, d, title) {
+  const box = document.getElementById(containerId);
+  // 数据留存供导出Excel（与 renderQuickTable 同口径），不渲染大表格
+  box._quickData = {headers: d.headers, rows: d.rows};
+  box.innerHTML = '<div class="table-ops">' +
+    '<button class="copy" onclick="exportQuickTable(\'' + containerId +
+      '\', \'' + esc(title) + '\')">导出Excel</button>' +
+    '<span class="hint" style="align-self:center">全部剧本的变量数量较多，' +
+      '不在页面展示，导出为 .xlsx 文件后查看</span></div>';
+}
+
+/* ---------- 批量修改变量掩码设置（2026-10-13，串行） ---------- */
+let mScriptsLoaded = false;
+async function loadMScripts() {
+  await loadScriptsTo('mb-script', 'mb-group');
+  mScriptsLoaded = true;
+}
+
+async function loadScriptsTo(scriptSel, groupSel) {
+  const el = document.getElementById(scriptSel);
+  const group = document.getElementById(groupSel).value;
+  el.innerHTML = '<option value="">（剧本加载中…）</option>';
+  try {
+    const r = await fetch('/api/quick/group_scripts', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({group: group})
+    });
+    const d = await r.json();
+    if (d.error) {
+      const first = String(d.error).split('\n')[0];
+      el.innerHTML = '<option value="" title="' + esc(d.error) + '">' +
+          '（剧本加载失败: ' + esc(first) + '，鼠标悬停查看原因）</option>';
+      return;
+    }
+    el.innerHTML = '<option value="">（全部剧本）</option>' +
+        (d.scripts || []).map(s =>
+          '<option value="' + esc(s.script_id) + '">' +
+          esc(s.script_name) + '（' + esc(s.agent_mode) + '）' +
+          esc(s.script_id) + '</option>').join('');
+  } catch (e) {
+    el.innerHTML = '<option value="">（剧本加载失败: ' + esc(e) + '）</option>';
+  }
+}
+
+async function batchMaskRun() {
+  if (!confirm('将把所选范围内全部剧本的全部变量开启"是否掩码并替换"' +
+      '（掩码文本=变量名称仅保留中文/英文/数字），串行执行不并行。' +
+      '修改只保存为草稿、不自动发布。确认执行？')) return;
+  busy('mb-btn', 'mb-msg', '开启中…（串行执行，剧本较多时需等待）');
+  document.getElementById('mb-result').innerHTML = '';
+  try {
+    const r = await fetch('/api/quick/batch_mask', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        group: document.getElementById('mb-group').value,
+        script_id: scriptIdFor('mb')
+      })
+    });
+    const d = await r.json();
+    if (d.error) { idle('mb-btn', 'mb-msg', '', '失败: ' + d.error); return; }
+    renderQuickTable('mb-result', d.headers, d.rows, '批量修改变量掩码设置');
+    idle('mb-btn', 'mb-msg', '共处理 ' + d.total + ' 个剧本，开启 ' +
+        d.masked + ' 个变量（已开启跳过 ' + d.skipped_same +
+        '，名称无法清洗跳过 ' + d.skipped_bad + '）' +
+        (d.errors ? '，' + d.errors + ' 个剧本失败' : ''));
+  } catch (e) { idle('mb-btn', 'mb-msg', '', '请求失败: ' + e); }
+}
+
+/* ---------- 批量发布剧本（2026-10-13，串行；线上需确认码） ---------- */
+let pScriptsLoaded = false;
+async function loadPScripts() {
+  await loadScriptsTo('bp-script', 'bp-group');
+  pScriptsLoaded = true;
+}
+
+async function batchPublishRun(mode, confirmCode) {
+  // 防重复点击：执行期间禁用本面板两个发布按钮（后台另有互斥锁兜底）
+  const btns = ['bp-test-btn', 'bp-online-btn'];
+  const first = mode === 'preview' ? 'bp-test-btn' : 'bp-online-btn';
+  for (const id of btns) {
+    const b = document.getElementById(id);
+    if (!b.dataset.label) b.dataset.label = b.textContent;
+    b.disabled = true;
+  }
+  busy(first, 'bp-msg', '发布中…（串行逐剧本发布并轮询，需等待）');
+  document.getElementById('bp-result').innerHTML = '';
+  const done = (ok, err) => {
+    for (const id of btns) {
+      const b = document.getElementById(id);
+      b.disabled = false; b.textContent = b.dataset.label || b.textContent;
+    }
+    idle(first, 'bp-msg', ok, err);
+  };
+  try {
+    const r = await fetch('/api/quick/batch_publish', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        group: document.getElementById('bp-group').value,
+        script_id: scriptIdFor('bp'),
+        mode: mode,
+        confirm_code: confirmCode || ''
+      })
+    });
+    const d = await r.json();
+    if (d.error) { done('', '失败: ' + d.error); return; }
+    renderQuickTable('bp-result', d.headers, d.rows, '批量发布剧本');
+    done('共发布 ' + d.total + ' 个剧本' +
+        (d.errors ? '，' + d.errors + ' 个失败' : ''));
+  } catch (e) { done('', '请求失败: ' + e); }
+}
+
+/* 发布确认码模态：展示确认码（支持复制）+ 输入框确认（prompt 2026-10-13）。
+   返回 Promise<string|null>：输入的确认码 / 取消为 null。 */
+function publishConfirmModal(code) {
+  return new Promise(resolve => {
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask';
+    mask.innerHTML =
+      '<div class="modal-box">' +
+      '<h3>确认发布到线上（生产变更）</h3>' +
+      '<div class="danger-alert">⚠ 发布上线会影响正在进行中的通话——' +
+      '请确认所选剧本当前没有进行中的通话再执行。</div>' +
+      '<div class="hint">请输入以下确认码以确认操作（当前登录用户名_随机6位数字，' +
+      '每次操作都会生成新的随机数，确认码一次性使用）：</div>' +
+      '<div class="modal-code-row"><span class="modal-code">' + esc(code) +
+      '</span><button class="copy" id="pc-copy-btn" type="button">复制</button></div>' +
+      '<input id="pc-input" type="text" placeholder="输入上方确认码…">' +
+      '<div class="modal-btns">' +
+      '<button class="copy" id="pc-cancel-btn" type="button">取消</button>' +
+      '<button class="primary" id="pc-ok-btn" type="button">确认执行</button>' +
+      '</div></div>';
+    document.body.appendChild(mask);
+    const input = mask.querySelector('#pc-input');
+    const close = (val) => { mask.remove(); resolve(val); };
+    mask.querySelector('#pc-copy-btn').onclick = async () => {
+      let ok = false;
+      try { await navigator.clipboard.writeText(code); ok = true; } catch (e) {
+        try { document.execCommand('copy'); ok = true; } catch (e2) {}
+      }
+      mask.querySelector('#pc-copy-btn').textContent = ok ? '已复制' : '复制失败';
+    };
+    mask.querySelector('#pc-cancel-btn').onclick = () => close(null);
+    mask.querySelector('#pc-ok-btn').onclick = () => close(input.value.trim());
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter') close(input.value.trim());
+      if (e.key === 'Escape') close(null);
+    };
+    mask.onclick = (e) => { if (e.target === mask) close(null); };
+    input.focus();
+  });
+}
+
+async function batchPublishAskOnline() {
+  if (!confirm('将对所选范围内全部剧本执行「发布测试版本 → 发布上线」' +
+      '（生产变更，串行执行）。\n\n⚠ 发布上线会影响正在进行中的通话：' +
+      '请先确认所选剧本当前没有进行中的通话，在无通话时间段执行。' +
+      '\n\n继续获取确认码？')) return;
+  // 后台生成「当前登录用户名_随机6位数字」确认码（内存缓存、新码覆盖
+  // 旧码），前端展示（可复制）并要求用户照原文输入，防止误操作
+  let code = '';
+  try {
+    const r = await fetch('/api/quick/publish_confirm', {method: 'POST'});
+    const d = await r.json();
+    if (d.error) { idle('bp-online-btn', 'bp-msg', '', '获取确认码失败: ' + d.error); return; }
+    code = d.code || '';
+  } catch (e) { idle('bp-online-btn', 'bp-msg', '', '获取确认码失败: ' + e); return; }
+  const input = await publishConfirmModal(code);
+  if (input === null) { idle('bp-online-btn', 'bp-msg', '', '已取消'); return; }
+  await batchPublishRun('preview_online', input);
 }
 
 async function quickExport() {
@@ -1266,7 +2029,8 @@ async function exportQuickTable(containerId, title) {
   const box = document.getElementById(containerId);
   const data = box._quickData;
   if (!data) return;
-  // 文件名带当前时间（prompt 2026-09-06：YYYYMMDD_HHMMSS，多次导出不重名）
+  // 文件名带当前时间（prompt 2026-09-06：YYYYMMDD_HHMMSS，多次导出不重名；
+  // 2026-10-11：服务端在文件名前再加当前火山引擎账号前缀）
   const now = new Date();
   const ts = now.getFullYear() +
       String(now.getMonth() + 1).padStart(2, '0') +
@@ -1281,10 +2045,17 @@ async function exportQuickTable(containerId, title) {
       body: JSON.stringify({filename: fname, headers: data.headers, rows: data.rows})
     });
     if (!r.ok) { alert('导出失败: HTTP ' + r.status); return; }
+    // 2026-10-11 prompt：文件名前缀为当前火山引擎账号（后端统一添加，
+    // 前端从 x-download-filename 响应头取最终文件名；取不到时回退本地名）
+    let finalName = fname;
+    const srv = r.headers.get('x-download-filename');
+    if (srv) {
+      try { finalName = decodeURIComponent(srv); } catch (e) { finalName = srv; }
+    }
     const blob = await r.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = fname + '.xlsx';
+    a.download = finalName + '.xlsx';
     document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
   } catch (e) { alert('导出失败: ' + e); }
@@ -1314,6 +2085,8 @@ loadGroups();
 loadExportDirs();
 loadAgentsDirs();
 connectProgress();
+// 可搜索下拉框（prompt 2026-10-13：输入关键字过滤选项）
+initSearchableSelects();
 </script>
 </body>
 </html>

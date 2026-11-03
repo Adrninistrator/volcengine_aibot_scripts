@@ -2,7 +2,7 @@
 
 把火山引擎智能外呼控制台（console.volcengine.com/aibot）的网页功能转换为 Python 脚本与 MCP 服务，供 AI 通过自然语言完成剧本的查询、修改、导入、发布与对话测试闭环。
 
-**17 个功能脚本 + Web 快捷工具**：获取当前登录账号、查询项目组、查询项目组下的剧本、按剧本ID查询、按名称搜索、导出剧本、导入剧本、发布测试版本、查询剧本变量、变量增删改、测试版本变量赋值、文本对话测试、查询剧本基本信息（含 Sub Agent）、查询分析Agent、获取分析Agent内容、批量导出剧本、搜索已导出剧本内容关键字、查询通话明细、删除剧本（仅 _由AI修改 后缀）、修改剧本 json HASH；Web 快捷工具：批量查询剧本信息、批量搜索剧本内容、批量下载搜索分析Agent、批量删除剧本。
+**功能脚本 + Web 快捷工具**：获取当前登录账号、查询项目组、查询项目组下的剧本、按剧本ID查询、按名称搜索、导出剧本、导入剧本、发布测试版本、查询剧本变量、变量增删改、测试版本变量赋值、文本对话测试、查询剧本基本信息（含 Sub Agent）、查询分析Agent、获取分析Agent内容、批量导出剧本、搜索已导出剧本内容关键字、查询通话明细、获取通话文本（机器人/客户区分，写入 `<通话ID>.md`）、删除剧本（仅 _由AI修改 后缀）、修改剧本 json HASH；Web 快捷工具：批量查询剧本信息、批量搜索剧本内容、批量下载搜索分析Agent、批量删除剧本。
 
 ## 目录结构
 
@@ -11,6 +11,7 @@ volcengine_aibot_scripts/
 ├─ volc_aibot/                  # 公共包（所有脚本与 MCP 共用）
 │  ├─ client.py                 # 控制台 API 客户端（全部接口封装+账号守卫）
 │  ├─ cookie_client.py          # chrome_capture_operate Cookie 查询客户端
+│  ├─ call_transcript.py        # 通话文本解析/渲染/导出（机器人/客户区分）
 │  ├─ global_config.py          # 全局配置（~/.volcengine_aibot_scripts/global.json）
 │  ├─ web/                      # 页面独立文件（2026-09-10 从 web_server.py 拆出）
 │  │  └─ index.html             # 整页 HTML（含内联样式与脚本，改后刷新即生效）
@@ -38,6 +39,7 @@ volcengine_aibot_scripts/
 │  ├─ batch_export_scripts.py   # 批量导出剧本（按项目组/全部）
 │  ├─ search_exported_scripts.py # 搜索已导出剧本内容关键字
 │  ├─ query_call_records.py      # 查询通话明细（过滤/分页/参数留档）
+│  ├─ get_call_transcripts.py    # 导出通话文本（轮次/时间/打断、并发、manifest、统计）
 │  ├─ delete_script.py           # 删除剧本（仅 _由AI修改 后缀；ID或名称）
 │  └─ update_script_hash.py      # 剧本 json HASH（checksum）校验/重算
 ├─ mcp_server.py                # 服务入口（同端口：Web 配置页 + MCP SSE；托盘）
@@ -66,8 +68,8 @@ install.bat          # 创建/复用 .venv 并安装 requests/mcp/uvicorn/sse-st
 
 ### 2. 运行前提（关键）
 
-- **chrome_capture_operate 服务**已启动（默认 `http://127.0.0.1:33445`），Chrome 插件已安装且允许推送 `volcengine.com` 的 Cookie；
-- **日常 Chrome** 已登录火山引擎智能外呼控制台。脚本不写死任何 Cookie，登录态每次运行时实时查询获取。
+- **chrome_capture_operate 服务**已启动（默认 `http://127.0.0.1:33445`）；
+- **当前 Cookie 来源对应的 Chrome** 已登录火山引擎智能外呼控制台：默认来源为日常 Chrome（插件需已安装且允许推送 `volcengine.com` 的 Cookie）；也可在配置页添加 CDP 抓包端口来源并在页面右上角切换。脚本不写死任何 Cookie，登录态每次运行时按当前来源实时查询获取。
 
 chrome_capture_operate 的安装与配置说明见其项目 README（github.com/Adrninistrator/chrome_capture_operate 或 gitee.com/adrninistrator/chrome_capture_operate）。
 
@@ -92,6 +94,7 @@ start.bat 19001                        # 本次覆盖端口
 - 系统托盘：**双击打开配置页**（http://127.0.0.1:19000/，**使用 Chrome 打开**——本工具依赖日常 Chrome 的登录态与 Cookie 推送；未安装 Chrome 时回退默认浏览器），右键菜单可退出；
 - 配置页（与 MCP SSE 同端口）：**快捷工具**（批量查询剧本信息、批量搜索剧本内容、批量下载搜索分析Agent，结果支持复制与导出 Excel（首行冻结+筛选，文件名含导出时间）；页面上方可折叠的执行状态面板经 WebSocket 实时展示当前请求、剧本ID/名称与百分比进度，完成时提醒）、设置**监听端口**（改后需重启）与
  **允许操作的账号**（唯一），显示当前可用的 MCP SSE URL（带复制按钮）；
+- **Cookie 获取来源**（2026-11-02）：配置页可添加「日常 Chrome 插件（profile ID）」或「CDP Chrome（调试端口）」来源，默认来源为日常 Chrome profile 0（不可修改/删除）；页面右上角切换当前来源，**切换后实时生效**；允许使用的来源与当前来源保存在全局配置 `cookie_sources` / `cookie_source_current`，不跨来源自动回退；
 - 全局配置文件：`C:\Users\<用户名>\.volcengine_aibot_scripts\global.json`；
 - **修改守卫**：修改类操作执行前先检查「**是否允许执行修改操作**」开关（默认关闭，未开启一律拒绝），再校验当前 Chrome 登录账号（/console/api/v2/user
  的 id）是否为允许账号，不一致拒绝执行；同一 Cookie 未变化时免重复检查；开关未开启或账号未配置时报错并提示到配置页设置（可用 `scripts\get_current_user.py --save-allowed` 直接写入当前账号）。

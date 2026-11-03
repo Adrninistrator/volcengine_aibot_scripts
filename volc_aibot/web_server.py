@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -144,6 +145,10 @@ def build_web_routes() -> list[Route]:
         cfg = global_config.load_config()
         port = global_config.get_server_port()
         from .autostart import is_autostart_enabled, other_autostart_entries
+        sources = cfg.get("cookie_sources") or []
+        current = cfg.get("cookie_source_current") or \
+            global_config.COOKIE_SOURCE_DEFAULT_ID
+        current_src = next((s for s in sources if s.get("id") == current), {})
         return JSONResponse({
             "server_port": port,
             "allow_mutation": global_config.get_allow_mutation(),
@@ -153,6 +158,10 @@ def build_web_routes() -> list[Route]:
             "autostart": is_autostart_enabled(),
             # 其他目录残留的自启动项（项目拷贝/迁移未跟随），页面提示迁移
             "autostart_other": other_autostart_entries(),
+            # Cookie 获取来源（2026-11-02，页面右上角切换）
+            "cookie_sources": sources,
+            "cookie_source_current": current,
+            "cookie_source_current_name": current_src.get("name", ""),
         })
 
     async def get_autostart(request: Request) -> Response:
@@ -207,15 +216,54 @@ def build_web_routes() -> list[Route]:
         if "allow_mutation" in data:
             # 修改操作开关（prompt 2026-09-07：默认关闭，只允许人工修改）
             cfg["allow_mutation"] = bool(data["allow_mutation"])
+        if "cookie_sources" in data:
+            # Cookie 来源列表（默认来源由 global_config 强制保留，不可改删）
+            try:
+                cfg["cookie_sources"] = global_config.normalize_cookie_sources(
+                    data["cookie_sources"], strict=True)
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+        if "cookie_source_current" in data:
+            cfg["cookie_source_current"] = str(
+                data["cookie_source_current"] or "").strip()
         if not cfg:
             return JSONResponse({"error": "无有效配置项"}, status_code=400)
-        saved = global_config.save_config(cfg)
+        old_port = global_config.get_server_port()
+        try:
+            saved = global_config.save_config(cfg)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        port_changed = (saved["server_port"] != old_port)
         return JSONResponse({
             "server_port": saved["server_port"],
             "allow_mutation": saved["allow_mutation"],
             "allowed_account": saved["allowed_account"],
-            "restart_required": True,
-            "message": "已保存（端口修改需重启服务生效）",
+            "cookie_sources": saved["cookie_sources"],
+            "cookie_source_current": saved["cookie_source_current"],
+            "restart_required": port_changed,
+            "message": ("已保存（端口修改需重启服务生效）"
+                        if port_changed else "已保存"),
+        })
+
+    async def post_cookie_source(request: Request) -> Response:
+        """切换当前 Cookie 来源（页面右上角；保存后下一次取 Cookie 生效）。
+
+        请求体 {"id": "<来源 id>"}；只允许切换到已启用的来源。
+        """
+        try:
+            data = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "请求体非 JSON"}, status_code=400)
+        try:
+            src = global_config.set_cookie_source_current(
+                str(data.get("id") or ""))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        return JSONResponse({
+            "ok": True,
+            "cookie_source": src,
+            "cookie_source_current": src["id"],
+            "cookie_source_current_name": src.get("name", ""),
         })
 
     async def get_tools(request: Request) -> Response:
@@ -269,6 +317,7 @@ def build_web_routes() -> list[Route]:
         Route("/", page),
         Route("/api/config", get_cfg, methods=["GET"]),
         Route("/api/config", post_cfg, methods=["POST"]),
+        Route("/api/cookie-source", post_cookie_source, methods=["POST"]),
         Route("/api/tools", get_tools, methods=["GET"]),
         Route("/api/md", get_md, methods=["GET"]),
         Route("/api/account", get_account, methods=["POST"]),
@@ -546,6 +595,533 @@ def batch_delete_scripts(script_ids: list[str]) -> dict:
         progress.set_source("")
 
 
+# 批量查询剧本变量：表头（llm/global_variables GET 全字段，
+# 2026-10-10 晚：含 IsPreset（前置传入）/Description（变量描述）/
+# IsMasked/MaskContent；是否必填受前置传入联动约束）
+SCRIPT_VARIABLES_HEADERS = [
+    "项目组", "剧本ID", "剧本名称", "剧本类型",
+    "变量ID", "变量名称", "调用名称", "前置传入", "是否必填", "变量类型",
+    "变量描述", "是否掩码并替换", "掩码替换文本",
+]
+
+
+def list_group_scripts(group: str = "") -> dict:
+    """查询项目组下的剧本清单（供批量查询剧本变量页选择剧本）。
+
+    返回 {"scripts": [{group, script_id, script_name, agent_mode,
+    coords}]}；coords 为数字坐标（批量查询变量直传，省逐个解析）。
+    group 为空时返回全部项目组的剧本。
+    """
+    from .client import agent_mode_name
+    client = _get_quick_client()
+    groups = client.query_project_groups()
+    if group:
+        selected = [g for g in groups if g.get("group_name") == group]
+        if not selected:
+            return {"error": f"项目组不存在: {group}"}
+    else:
+        selected = groups
+    scripts: list[dict] = []
+    for g in selected:
+        gname = g.get("group_name") or str(g.get("id"))
+        progress.report_stage(f"查询项目组下的剧本 {gname}", group=gname)
+        for s in client.list_group_all_scripts(g["id"]):
+            scripts.append({
+                "group": gname,
+                "script_id": s.get("AgentID") or "",
+                "script_name": s.get("AgentName") or "",
+                "agent_mode": agent_mode_name(s.get("AgentMode")),
+                "coords": {"project": s.get("ProjectID"),
+                           "service": s.get("ServiceID"),
+                           "group": s.get("GroupID"),
+                           "agent_id": s.get("AgentID") or "",
+                           "agent_name": s.get("AgentName") or ""},
+            })
+    return {"scripts": scripts}
+
+
+def _variable_row(v: dict) -> list:
+    """GET llm/global_variables 单个变量 -> 行（列序同后 9 列表头）。"""
+    from .config import VARIABLE_TYPES
+    t = v.get("VariableType")
+    type_text = f"{t} {VARIABLE_TYPES.get(t, '')}".strip() if t else ""
+    return [
+        v.get("id", ""), v.get("name", ""), v.get("key", ""),
+        "是" if v.get("IsPreset") else "否",
+        "是" if v.get("IsRequired") else "否",
+        type_text,
+        v.get("Description", ""),
+        "是" if v.get("IsMasked") else "否",
+        v.get("MaskContent", ""),
+    ]
+
+
+def _filter_scripts_by_ids(scripts: list, script_id: str) -> tuple:
+    """按剧本ID过滤清单（prompt 2026-10-13：支持半角逗号分隔多个ID，
+    页面新增剧本ID输入框）。返回 (过滤后清单, 错误信息或 None)。"""
+    wanted = {x.strip() for x in str(script_id or "").split(",")
+              if x.strip()}
+    if not wanted:
+        return scripts, None
+    out = [s for s in scripts if s.get("script_id") in wanted]
+    if not out:
+        return [], (f"剧本 {script_id} 不在所选项目组范围内（多个剧本ID"
+                    "以半角逗号分隔）")
+    return out, None
+
+
+def query_script_variables(group: str = "", script_id: str = "",
+                           concurrency: int | None = None) -> dict:
+    """批量查询剧本变量（llm/global_variables 全字段，含掩码字段）。
+
+    - group：项目组名（空=全部项目组）；
+    - script_id：剧本ID（空=所选范围内全部剧本）；
+    - 行结构：前 4 列剧本维度（项目组/剧本ID/剧本名称/剧本类型），
+      后 9 列同 SCRIPT_VARIABLES_HEADERS[4:]。
+    返回 {headers, rows, total, errors}（脚本数与变量行数）。
+    """
+    import time as _time
+    from .concurrency import clamp_concurrency, run_parallel
+    c = clamp_concurrency(concurrency)
+    # 本线程及并发 worker 的全部事件归属「批量查询剧本变量」面板
+    progress.set_source("variables")
+    start = _time.perf_counter()
+    rows: list = []
+    scripts: list = []
+    errors = 0
+    try:
+        client = _get_quick_client()
+        listing = list_group_scripts(group)
+        if isinstance(listing, dict) and listing.get("error"):
+            return listing
+        scripts = listing["scripts"]
+        scripts, _err = _filter_scripts_by_ids(scripts, script_id)
+        if _err:
+            return {"error": _err}
+
+        def query_one(s: dict):
+            variables = client.query_variables(s["script_id"],
+                                               coords=s["coords"])
+            return [[s["group"], s["script_id"], s["script_name"],
+                     s["agent_mode"]] + _variable_row(v)
+                    for v in variables]
+
+        def on_progress(s: dict, index: int, total: int) -> None:
+            # worker 线程：先标记来源，使 HTTP 请求事件同样归属
+            progress.set_source("variables")
+            progress.report_stage(
+                f"查询剧本变量 {s.get('script_id') or ''}",
+                group=s.get("group"),
+                script_id=s.get("script_id") or "",
+                script_name=s.get("script_name") or "",
+                index=index, total=total)
+
+        # 并发查询（与批量查询剧本信息同口径）
+        results = run_parallel(scripts, query_one, concurrency=c,
+                               progress=on_progress)
+        for s, r in zip(scripts, results):
+            if isinstance(r, tuple) and r and r[0] == "error":
+                errors += 1
+                rows.append([s["group"], s["script_id"],
+                             s["script_name"], s["agent_mode"],
+                             "（查询失败）"] + [""] * 7)
+            else:
+                rows.extend(r)
+        return {"headers": SCRIPT_VARIABLES_HEADERS, "rows": rows,
+                "total": len(scripts), "variables": len(rows),
+                "errors": errors}
+    finally:
+        elapsed_s = round(_time.perf_counter() - start, 1)
+        summary = (f"批量查询变量完成：{len(scripts)} 个剧本"
+                   f" {len(rows)} 个变量")
+        if errors:
+            summary += f"，{errors} 个剧本失败"
+        progress.report_done(summary, elapsed_s=elapsed_s,
+                             total=len(scripts), variables=len(rows),
+                             errors=errors)
+        progress.set_source("")
+
+
+# 查询未掩码/掩码不合规变量：表头（prompt 2026-10-13：未开启掩码，或
+# 掩码文本不等于变量名称仅保留中文+英文+数字的结果）
+UNMASKED_VAR_HEADERS = [
+    "项目组", "剧本ID", "剧本名称", "剧本类型",
+    "变量ID", "变量名称", "调用名称", "变量类型",
+    "是否掩码并替换", "当前掩码替换文本", "问题",
+]
+
+
+def query_unmasked_variables(group: str = "", script_id: str = "",
+                             concurrency: int | None = None) -> dict:
+    """批量查询未掩码/掩码不合规的变量（查询类，与批量查询剧本变量同
+    并发口径；prompt 2026-10-13）。
+
+    **只检查前置传入=是（IsPreset=true）的变量**（prompt 2026-10-13：
+    对话测试/实际外呼只需为前置传入变量指定值与掩码，非前置传入变量
+    不参与）。在前置传入变量中查出满足任一条件的：
+    - 未开启掩码（IsMasked=false）；
+    - 掩码文本不满足要求（IsMasked=true 但 MaskContent != 变量名称
+      仅保留中文/英文/数字的结果）；
+    - 变量名称无法清洗出合法掩码文本（全非法字符，掩码文本不可能合规）。
+    行结构：前 4 列剧本基本信息 + 变量详细信息（含问题原因与应为的
+    合规掩码文本）。
+    返回 {headers, rows, total(违规行数), scripts, variables, errors}
+    （variables 为检查的前置传入变量数）。
+    """
+    import time as _time
+    from .client import mask_text_from_name
+    from .concurrency import clamp_concurrency, run_parallel
+    c = clamp_concurrency(concurrency)
+    # 归属「批量查询剧本变量」面板（同菜单按钮）
+    progress.set_source("variables")
+    start = _time.perf_counter()
+    rows: list = []
+    scripts: list = []
+    errors = 0
+    stats = {"variables": 0}
+    try:
+        client = _get_quick_client()
+        listing = list_group_scripts(group)
+        if isinstance(listing, dict) and listing.get("error"):
+            return listing
+        scripts = listing["scripts"]
+        scripts, _err = _filter_scripts_by_ids(scripts, script_id)
+        if _err:
+            return {"error": _err}
+
+        def check_one(s: dict):
+            from .config import VARIABLE_TYPES
+            variables = client.query_variables(s["script_id"],
+                                               coords=s["coords"])
+            out = []
+            preset = [v for v in variables if v.get("IsPreset")]
+            for v in preset:   # 只检查前置传入=是的变量（prompt 2026-10-13）
+                masked = bool(v.get("IsMasked"))
+                cur = v.get("MaskContent") or ""
+                problems = []
+                expected = ""
+                try:
+                    expected = mask_text_from_name(v.get("name"))
+                except ValueError:
+                    # 名称清洗后为空：掩码文本不可能合规
+                    out.append([s["group"], s["script_id"],
+                                s["script_name"], s["agent_mode"],
+                                v.get("id", ""), v.get("name", ""),
+                                v.get("key", ""),
+                                f"{v.get('VariableType')} "
+                                f"{VARIABLE_TYPES.get(v.get('VariableType'), '')}".strip(),
+                                "是" if masked else "否", cur,
+                                "变量名称仅保留中文/英文/数字后为空，"
+                                "无法生成合法掩码文本"])
+                    continue
+                if not masked:
+                    problems.append("未开启掩码")
+                elif cur != expected:
+                    problems.append(
+                        f"掩码文本不满足要求（当前={cur!r}，"
+                        f"应为变量名称清洗结果={expected!r}）")
+                if not problems:
+                    continue
+                out.append([s["group"], s["script_id"], s["script_name"],
+                            s["agent_mode"],
+                            v.get("id", ""), v.get("name", ""),
+                            v.get("key", ""),
+                            f"{v.get('VariableType')} "
+                            f"{VARIABLE_TYPES.get(v.get('VariableType'), '')}".strip(),
+                            "是" if masked else "否", cur,
+                            "；".join(problems)])
+            # 统计随结果返回（主线程聚合，避免并发计数竞争）；
+            # variables=本次检查的前置传入变量数（不含非前置传入）
+            return {"rows": out, "variables": len(preset)}
+
+        def on_progress(s: dict, index: int, total: int) -> None:
+            progress.set_source("variables")
+            progress.report_stage(
+                f"查询未掩码变量 {s.get('script_id') or ''}",
+                group=s.get("group"),
+                script_id=s.get("script_id") or "",
+                script_name=s.get("script_name") or "",
+                index=index, total=total)
+
+        results = run_parallel(scripts, check_one, concurrency=c,
+                               progress=on_progress)
+        for s, r in zip(scripts, results):
+            if isinstance(r, tuple) and r and r[0] == "error":
+                errors += 1
+            else:
+                rows.extend(r["rows"])
+                stats["variables"] += r["variables"]
+        rows.sort(key=lambda x: (x[0], x[1], str(x[5])))
+        return {"headers": UNMASKED_VAR_HEADERS, "rows": rows,
+                "total": len(rows), "scripts": len(scripts),
+                "variables": stats["variables"], "errors": errors}
+    finally:
+        elapsed_s = round(_time.perf_counter() - start, 1)
+        summary = (f"查询未掩码/掩码不合规变量完成：{len(scripts)} 个剧本 "
+                   f"{stats['variables']} 个前置传入变量，"
+                   f"{len(rows)} 个不合规")
+        if errors:
+            summary += f"，{errors} 个剧本查询失败"
+        progress.report_done(summary, elapsed_s=elapsed_s,
+                             total=len(scripts), violations=len(rows),
+                             errors=errors)
+        progress.set_source("")
+
+
+# 批量开启变量掩码：结果表头（prompt 2026-10-13：全部变量开启掩码开关，
+# 掩码文本=变量名称仅保留中文/英文/数字；串行执行不并行）
+BATCH_MASK_HEADERS = [
+    "项目组", "剧本ID", "剧本名称", "剧本类型",
+    "变量总数", "本次开启", "已开启跳过", "名称无法清洗跳过", "结果",
+]
+
+
+# 批量修改类操作互斥锁（prompt 2026-10-13：批量掩码/批量发布后台不允许
+# 同时执行——非阻塞抢占：执行中再收到请求直接拒绝）
+_batch_ops_lock = threading.Lock()
+
+
+def batch_mask_variables(group: str = "", script_id: str = "") -> dict:
+    """批量开启剧本变量掩码（全部变量 IsMasked=true，掩码文本=变量名称
+    仅保留中文/英文/数字的结果）。
+
+    范围：group 空=全部项目组；script_id 空=范围内全部剧本。
+    **串行执行（prompt 2026-10-13：不并行）**——逐剧本 查询变量→
+    构造更新（仅处理需要变化的：未开启掩码或掩码文本非清洗名称）→
+    client.modify_variables（全字段回传+联动修正）。
+    ⚠ 互斥（prompt 2026-10-13）：与批量发布共用非阻塞锁，已有批量操作
+    执行中时直接拒绝（不允许同时执行）。
+    修改只保存为草稿，**不自动发布**（发布为独立操作）。
+    返回 {headers, rows, total, errors, masked, skipped}。
+    """
+    import time as _time
+    from .client import mask_text_from_name
+    if not _batch_ops_lock.acquire(blocking=False):
+        return {"error": "已有批量操作（批量掩码/批量发布）正在执行中，"
+                         "请等待完成后再执行（后台不允许同时执行）"}
+    # 本线程全部事件归属「批量修改变量掩码设置」面板
+    progress.set_source("maskbatch")
+    start = _time.perf_counter()
+    rows: list = []
+    scripts: list = []
+    errors = 0
+    masked = skipped_same = skipped_bad = 0
+    try:
+        client = _get_quick_client()
+        # 修改守卫前置校验（2026-10-13 自查修复：开关未开/账号不符时
+        # 直接拒绝整个批量，不开始执行——此前逐剧本失败或幂等"成功"）
+        try:
+            client.ensure_account_allowed(mutating=True)
+        except Exception as e:  # noqa: BLE001 - 守卫拒绝转为错误返回
+            return {"error": str(e)}
+        listing = list_group_scripts(group)
+        if isinstance(listing, dict) and listing.get("error"):
+            return listing
+        scripts = listing["scripts"]
+        scripts, _err = _filter_scripts_by_ids(scripts, script_id)
+        if _err:
+            return {"error": _err}
+
+        for i, s in enumerate(scripts):   # 串行（prompt：不并行）
+            sid = s["script_id"]
+            progress.report_stage(f"开启变量掩码 {sid}", group=s["group"],
+                                  script_id=sid,
+                                  script_name=s.get("script_name") or "",
+                                  index=i + 1, total=len(scripts))
+            try:
+                variables = client.query_variables(sid, coords=s["coords"])
+                items = []
+                s_same = s_bad = 0
+                for v in variables:
+                    try:
+                        text = mask_text_from_name(v.get("name"))
+                    except ValueError:
+                        s_bad += 1      # 名称清洗后为空（全非法字符）
+                        continue
+                    if v.get("IsMasked") and v.get("MaskContent") == text:
+                        s_same += 1     # 已是目标状态，跳过（幂等）
+                        continue
+                    items.append({"id": v["id"], "IsMasked": True,
+                                  "MaskContent": text})
+                if items:
+                    client.modify_variables(sid, update=items)
+                masked += len(items)
+                skipped_same += s_same
+                skipped_bad += s_bad
+                rows.append([s["group"], sid, s["script_name"],
+                             s["agent_mode"], len(variables), len(items),
+                             s_same, s_bad, "成功"])
+            except Exception as e:  # noqa: BLE001
+                errors += 1
+                rows.append([s["group"], sid, s["script_name"],
+                             s["agent_mode"], "", "", "", "",
+                             f"失败: {str(e)[:80]}"])
+        return {"headers": BATCH_MASK_HEADERS, "rows": rows,
+                "total": len(scripts), "errors": errors, "masked": masked,
+                "skipped_same": skipped_same, "skipped_bad": skipped_bad}
+    finally:
+        elapsed_s = round(_time.perf_counter() - start, 1)
+        summary = (f"批量开启变量掩码完成：{len(scripts)} 个剧本，"
+                   f"开启 {masked} 个变量（已开启跳过 {skipped_same}、"
+                   f"名称无法清洗跳过 {skipped_bad}）")
+        if errors:
+            summary += f"，{errors} 个剧本失败"
+        progress.report_done(summary, elapsed_s=elapsed_s,
+                             total=len(scripts), masked=masked,
+                             errors=errors)
+        progress.set_source("")
+        _batch_ops_lock.release()
+# 批量发布剧本：结果表头（prompt 2026-10-13；串行执行不并行）
+BATCH_PUBLISH_HEADERS = [
+    "项目组", "剧本ID", "剧本名称", "剧本类型",
+    "测试版本发布", "线上版本发布", "结果",
+]
+
+# 发布线上版本的防误操作确认码（内存缓存，prompt 2026-10-13：
+# 用户名_随机6位数字，后台生成缓存并返回前端显示、要求用户输入确认）
+_publish_confirm: dict = {"code": "", "expires": 0.0}
+PUBLISH_CONFIRM_TTL = 600.0   # 确认码有效期（秒）
+
+
+def _new_publish_confirm() -> dict:
+    """生成发布确认码：当前登录用户名_随机6位数字（内存缓存，新码覆盖旧码）。返回 {username, code, expires_in}。"""
+    import random
+    import time as _time
+    client = _get_quick_client()
+    user = client.get_current_user()
+    username = str(user.get("username") or "").strip()
+    if not username:
+        raise RuntimeError("无法获取当前登录用户名（未登录或 Cookie 失效），"
+                           "不能生成发布确认码")
+    code = f"{username}_{random.randint(0, 999999):06d}"
+    _publish_confirm.update(code=code, expires=_time.time() + PUBLISH_CONFIRM_TTL)
+    return {"username": username, "code": code,
+            "expires_in": int(PUBLISH_CONFIRM_TTL)}
+
+
+def _check_publish_confirm(code: str) -> tuple[bool, str]:
+    """校验发布确认码（匹配且未过期，通过后即失效——一次性使用）。"""
+    import time as _time
+    code = str(code or "").strip()
+    if not code:
+        return False, "未输入确认码"
+    if not _publish_confirm["code"]:
+        return False, "确认码不存在（请先点击按钮获取）"
+    if _time.time() > _publish_confirm["expires"]:
+        _publish_confirm.update(code="", expires=0.0)
+        return False, "确认码已失效，请重新获取"
+    if code != _publish_confirm["code"]:
+        return False, "确认码不匹配（请按页面显示的确认码输入）"
+    _publish_confirm.update(code="", expires=0.0)   # 一次性使用
+    return True, ""
+
+
+def batch_publish_scripts(group: str = "", script_id: str = "",
+                          mode: str = "preview",
+                          confirm_code: str = "") -> dict:
+    """批量发布剧本（prompt 2026-10-13；**串行执行不并行**）。
+
+    - mode="preview"：逐剧本发布测试版本；
+    - mode="preview_online"：逐剧本发布测试版本→发布上线（生产变更，
+      受配置参数「是否允许执行修改操作」与「允许执行修改操作的账号」
+      控制——client 修改守卫自动生效；并需通过防误操作确认码
+      confirm_code：先调 publish_confirm 接口生成「用户名_随机6位数字」
+      并在前端显示（可复制），用户输入一致才执行，一次性使用）。
+    发布均为修改操作（走 client 修改守卫）；逐剧本串行发布并轮询至完成。
+    ⚠ **发布时不判断剧本修改时间**（2026-10-13 决策）：修改时间
+    （agent/list 的 UpdateTime）不随变量修改变化（仅发布提交/话术编排
+    保存触碰，实测修改变量后 90 秒不变）——以修改时间判断"是否需要
+    发布"会漏掉纯变量修改（含批量掩码设置）导致误跳过，故所有选中
+    剧本均无条件执行发布。
+    返回 {headers, rows, total, errors}。
+    """
+    import time as _time
+    if mode not in ("preview", "preview_online"):
+        return {"error": f"mode 必须是 preview 或 preview_online: {mode!r}"}
+    if not _batch_ops_lock.acquire(blocking=False):
+        return {"error": "已有批量操作（批量掩码/批量发布）正在执行中，"
+                         "请等待完成后再执行（后台不允许同时执行）"}
+    desc = "批量发布测试版本-" + _time.strftime("%Y%m%d%H%M%S")
+    progress.set_source("publishbatch")
+    start = _time.perf_counter()
+    rows: list = []
+    scripts: list = []
+    errors = 0
+    try:
+        # 修改守卫前置校验（2026-10-13 自查修复：开关未开/账号不符时
+        # 直接拒绝整个批量，不开始执行——此前逐剧本失败或幂等"成功"）
+        try:
+            _get_quick_client().ensure_account_allowed(mutating=True)
+        except Exception as e:  # noqa: BLE001 - 守卫拒绝转为错误返回
+            return {"error": str(e)}
+        # 确认码校验放在互斥与守卫之后（通过即消费一次性码）：放在
+        # 之前时互斥忙/守卫拒绝会让码被消费但发布未执行（自查修复；
+        # 校验失败走本 return，锁由 finally 释放）
+        if mode == "preview_online":
+            ok, err = _check_publish_confirm(confirm_code)
+            if not ok:
+                return {"error": f"发布确认未通过: {err}"}
+        # ⚠ 发布时不判断剧本修改时间（prompt 2026-10-13 决策）：
+        # 修改时间（agent/list 的 UpdateTime）不随变量修改变化（仅发布
+        # 提交/话术编排保存触碰，实测修改变量后等 90 秒不变）——若以
+        # "修改时间早于发布时间则跳过"判断，纯变量修改（含批量掩码设置）
+        # 会被误判"无需发布"跳过、修改无法随发布生效，故所有选中剧本
+        # 均无条件执行发布。
+        client = _get_quick_client()
+        listing = list_group_scripts(group)
+        if isinstance(listing, dict) and listing.get("error"):
+            return listing
+        scripts = listing["scripts"]
+        scripts, _err = _filter_scripts_by_ids(scripts, script_id)
+        if _err:
+            return {"error": _err}
+
+        for i, s in enumerate(scripts):   # 串行（prompt：不并行）
+            sid = s["script_id"]
+            progress.report_stage(f"发布剧本 {sid}", group=s["group"],
+                                  script_id=sid,
+                                  script_name=s.get("script_name") or "",
+                                  index=i + 1, total=len(scripts))
+            preview_txt = online_txt = ""
+            try:
+                pub = client.publish_preview(sid, desc)
+                preview_txt = (f"V{pub['before_version']} -> "
+                               f"V{pub['new_version']}")
+                if mode == "preview_online":
+                    on = client.publish_online(sid)
+                    online_txt = (f"V{on['before_online_version']} -> "
+                                  f"V{on['new_version']}")
+                rows.append([s["group"], sid, s["script_name"],
+                             s["agent_mode"], preview_txt, online_txt,
+                             "成功"])
+            except Exception as e:  # noqa: BLE001
+                errors += 1
+                rows.append([s["group"], sid, s["script_name"],
+                             s["agent_mode"], preview_txt, online_txt,
+                             f"失败: {str(e)[:100]}"])
+        return {"headers": BATCH_PUBLISH_HEADERS, "rows": rows,
+                "total": len(scripts), "errors": errors,
+                "mode": mode}
+    finally:
+        elapsed_s = round(_time.perf_counter() - start, 1)
+        label = "测试版本" if mode == "preview" else "测试+线上版本"
+        summary = f"批量发布（{label}）完成：{len(scripts)} 个剧本"
+        if errors:
+            summary += f"，{errors} 个失败"
+        progress.report_done(summary, elapsed_s=elapsed_s,
+                             total=len(scripts), errors=errors)
+        progress.set_source("")
+        _batch_ops_lock.release()
+
+
+# 修改后未发布的剧本：精简表头（prompt 2026-10-12：查询结果只需基本的
+# 项目/剧本信息 + 修改/发布时间与发布判断，不含配置/分析Agents等全量列）
+UNPUBLISHED_SCRIPT_HEADERS = [
+    "项目组", "剧本ID", "剧本名称", "剧本类型",
+    "剧本修改时间", "测试版本发布时间", "线上版本发布时间",
+    "修改后是否有发布",
+]
+
 # 批量查询剧本信息：表头（与「查询剧本基本信息」输出字段一致）
 SCRIPT_INFO_HEADERS = [
     "项目组", "剧本ID", "剧本名称", "剧本类型",
@@ -556,8 +1132,11 @@ SCRIPT_INFO_HEADERS = [
     "信息抽取-ID", "信息抽取-名称", "信息抽取-状态", "信息抽取-更新时间",
     "线索定级-ID", "线索定级-名称", "线索定级-状态", "线索定级-更新时间",
     "通话总结-ID", "通话总结-名称", "通话总结-状态", "通话总结-更新时间",
-    "测试版本发布-版本号", "测试版本发布-更新时间",
-    "线上版本发布-版本号", "线上版本发布-更新时间",
+    "测试版本发布-版本号", "测试版本发布时间",
+    "线上版本发布-版本号", "线上版本发布时间",
+    # 2026-10-12 新增（prompt）：剧本修改时间与修改后是否有发布
+    # （修改时间<=线上版本发布时间+60秒容差=是；口径见 client.get_script_info）
+    "剧本修改时间", "修改后是否有发布",
 ]
 
 
@@ -583,6 +1162,7 @@ def _script_info_row(info: dict) -> list:
 
     pv = info.get("preview_publish") or {}
     ov = info.get("online_publish") or {}
+    from .client import fmt_launch_time
     return [
         info.get("project_group", ""), info.get("script_id", ""),
         info.get("script_name", ""), info.get("agent_mode_name", ""),
@@ -595,8 +1175,10 @@ def _script_info_row(info: dict) -> list:
         *agent_cells("外呼-信息抽取"),
         *agent_cells("外呼-线索定级"),
         *agent_cells("外呼-通话总结"),
-        pv.get("version"), pv.get("update_time"),
-        ov.get("version"), ov.get("update_time"),
+        pv.get("version"), fmt_launch_time(pv.get("update_time")),
+        ov.get("version"), fmt_launch_time(ov.get("update_time")),
+        info.get("modify_time", ""),
+        info.get("modified_published", ""),
     ]
 
 
@@ -712,7 +1294,9 @@ def build_quick_routes() -> list[Route]:
         return JSONResponse({"groups": [
             {"id": g.get("id"), "name": g.get("group_name")} for g in groups]})
 
-    def _query_all(group: str, concurrency: int | None = None) -> dict:
+    def _query_all(group: str, script_id: str = "",
+                   concurrency: int | None = None,
+                   only_unpublished: bool = False) -> dict:
         import time as _time
         from .concurrency import clamp_concurrency, run_parallel
         c = clamp_concurrency(concurrency)
@@ -731,53 +1315,91 @@ def build_quick_routes() -> list[Route]:
                 selected = groups
             rows: list = []
             errors = 0
+            # 先收集全部项目组的剧本（prompt 2026-10-13：提前统计总体数量，
+            # 进度百分比按总量显示——不按组分段上报，避免百分比反复归零）
+            tasks: list[tuple[str, dict]] = []
             for g in selected:
                 gname = g.get("group_name") or str(g.get("id"))
                 progress.report_stage("查询项目组下的剧本", group=gname)
-                scripts = client.list_group_all_scripts(g["id"])
+                for s in client.list_group_all_scripts(g["id"]):
+                    tasks.append((gname, s))
+            # 剧本ID过滤（prompt 2026-10-13：页面剧本ID输入框，支持
+            # 半角逗号分隔多个；空=范围内全部剧本）
+            if script_id:
+                wanted = {x.strip()
+                          for x in script_id.split(",") if x.strip()}
+                tasks = [t for t in tasks if t[1].get("AgentID") in wanted]
+                if not tasks:
+                    return {"error": f"剧本 {script_id} 不在所选项目组"
+                                     "范围内（多个剧本ID以半角逗号分隔）"}
 
-                def query_one(s: dict):
-                    # 传入清单项：省 query_script（agent/list 数据已在 s 中）
-                    sid = s.get("AgentID") or ""
-                    coords = {"project": s.get("ProjectID"),
-                              "service": s.get("ServiceID"),
-                              "group": s.get("GroupID"),
-                              "agent_id": sid,
-                              "agent_name": s.get("AgentName") or ""}
-                    return _script_info_row(client.get_script_info(
-                        sid, coords=coords, agent=s))
+            def query_one(item: tuple):
+                gname, s = item
+                # 传入清单项：省 query_script（agent/list 数据已在 s 中）
+                sid = s.get("AgentID") or ""
+                coords = {"project": s.get("ProjectID"),
+                          "service": s.get("ServiceID"),
+                          "group": s.get("GroupID"),
+                          "agent_id": sid,
+                          "agent_name": s.get("AgentName") or ""}
+                return _script_info_row(client.get_script_info(
+                    sid, coords=coords, agent=s))
 
-                def on_progress(s: dict, index: int, total: int) -> None:
-                    # worker 线程：先标记来源，使 HTTP 请求事件同样归属
-                    progress.set_source("query")
-                    progress.report_stage(
-                        f"查询剧本基本信息 {s.get('AgentID') or ''}",
-                        group=gname,
-                        script_id=s.get("AgentID") or "",
-                        script_name=s.get("AgentName") or "",
-                        index=index, total=total)
+            def on_progress(item: tuple, index: int, total: int) -> None:
+                # worker 线程：先标记来源，使 HTTP 请求事件同样归属；
+                # index/total 为全部项目组剧本的总体进度（单轮递增不归零）
+                gname, s = item
+                progress.set_source("query")
+                progress.report_stage(
+                    f"查询剧本基本信息 {s.get('AgentID') or ''}",
+                    group=gname,
+                    script_id=s.get("AgentID") or "",
+                    script_name=s.get("AgentName") or "",
+                    index=index, total=total)
 
-                # 并发查询（prompt 2026-09-06：获得剧本后并发查询剧本信息）
-                results = run_parallel(scripts, query_one, concurrency=c,
-                                       progress=on_progress)
-                for s, r in zip(scripts, results):
-                    sid = s.get("AgentID") or ""
-                    if isinstance(r, tuple) and r and r[0] == "error":
-                        errors += 1
+            # 并发查询（prompt 2026-09-06：获得剧本后并发查询剧本信息）
+            results = run_parallel(tasks, query_one, concurrency=c,
+                                   progress=on_progress)
+            for (gname, s), r in zip(tasks, results):
+                sid = s.get("AgentID") or ""
+                if isinstance(r, tuple) and r and r[0] == "error":
+                    errors += 1
+                    if not only_unpublished:
                         rows.append([gname, sid, s.get("AgentName") or "",
-                                     "（查询失败）"] + [""] * 24)
-                    else:
-                        rows.append(r)
-            return {"headers": SCRIPT_INFO_HEADERS, "rows": rows,
-                    "total": len(rows), "errors": errors}
+                                     "（查询失败）"] + [""] * 26)
+                else:
+                    rows.append(r)
+            if only_unpublished:
+                # 仅保留修改后未发布的剧本（最后一列"修改后是否有发布"=否）
+                # total_all 含查询失败的剧本（"共检查 N 个"不漏计）
+                total_all = len(rows) + errors
+                rows = [r for r in rows if str(r[-1]) == "否"]
+                unpublished = len(rows)
+                # 精简为基本项目/剧本信息 + 三个时间 + 发布判断
+                # （prompt 2026-10-12：按表头名取列，避免索引漂移）
+                idx = {h: i for i, h in enumerate(SCRIPT_INFO_HEADERS)}
+                keep = [idx[h] for h in UNPUBLISHED_SCRIPT_HEADERS]
+                rows = [[r[i] for i in keep] for r in rows]
+                headers = UNPUBLISHED_SCRIPT_HEADERS
+            else:
+                total_all = unpublished = len(rows)
+                headers = SCRIPT_INFO_HEADERS
+            return {"headers": headers, "rows": rows,
+                    "total": len(rows), "errors": errors,
+                    "total_all": total_all, "unpublished": unpublished}
         finally:
             elapsed_s = round(_time.perf_counter() - start, 1)
             # 完成事件：清空面板计时、显示完成提示（页面未聚焦时闪烁提醒）
-            summary = f"批量查询完成：共 {len(rows)} 个剧本"
+            if only_unpublished:
+                summary = (f"查询修改后未发布剧本完成：共 {len(rows)} 个"
+                           f"（检查 {total_all} 个）")
+            else:
+                summary = f"批量查询完成：共 {len(rows)} 个剧本"
             if errors:
                 summary += f"，{errors} 个失败"
             progress.report_done(summary, elapsed_s=elapsed_s,
-                                 total=len(rows), errors=errors)
+                                 total=total_all, unpublished=unpublished,
+                                 errors=errors)
             progress.set_source("")
 
     async def post_query_scripts(request: Request) -> Response:
@@ -786,13 +1408,105 @@ def build_quick_routes() -> list[Route]:
         except ValueError:
             return JSONResponse({"error": "请求体非 JSON"}, status_code=400)
         group = str(data.get("group") or "").strip()
+        script_id = str(data.get("script_id") or "").strip()
         try:
             concurrency = int(data.get("concurrency") or 0)
         except (TypeError, ValueError):
             concurrency = 0
         try:
-            result = await run_in_threadpool(_query_all, group, concurrency)
+            result = await run_in_threadpool(
+                _query_all, group, script_id, concurrency)
         except Exception as e:  # noqa: BLE001
+            return JSONResponse({"error": str(e)[:300]}, status_code=500)
+        return JSONResponse(result)
+
+    async def post_query_unpublished(request: Request) -> Response:
+        """单独查询修改后未发布的剧本（prompt 2026-10-12：全量查询后
+        过滤"修改后是否有发布"=否的行，含从未发布过的剧本；结果精简为
+        基本项目/剧本信息 + 剧本修改时间/测试版本发布时间/线上版本发布
+        时间/修改后是否有发布列，UNPUBLISHED_SCRIPT_HEADERS 共 8 列）。"""
+        try:
+            data = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "请求体非 JSON"}, status_code=400)
+        group = str(data.get("group") or "").strip()
+        script_id = str(data.get("script_id") or "").strip()
+        try:
+            concurrency = int(data.get("concurrency") or 0)
+        except (TypeError, ValueError):
+            concurrency = 0
+        try:
+            result = await run_in_threadpool(
+                _query_all, group, script_id, concurrency, True)
+        except Exception as e:  # noqa: BLE001
+            _log_quick_error(e)
+            return JSONResponse({"error": str(e)[:300]}, status_code=500)
+        return JSONResponse(result)
+
+    async def post_query_unmasked_vars(request: Request) -> Response:
+        """查询未掩码/掩码不合规变量（prompt 2026-10-13：未开启掩码，或
+        掩码文本不等于变量名称清洗结果；查询类并发口径）。"""
+        try:
+            data = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "请求体非 JSON"}, status_code=400)
+        group = str(data.get("group") or "").strip()
+        script_id = str(data.get("script_id") or "").strip()
+        try:
+            concurrency = int(data.get("concurrency") or 0)
+        except (TypeError, ValueError):
+            concurrency = 0
+        try:
+            result = await run_in_threadpool(
+                query_unmasked_variables, group, script_id, concurrency)
+        except Exception as e:  # noqa: BLE001
+            _log_quick_error(e)
+            return JSONResponse({"error": str(e)[:300]}, status_code=500)
+        return JSONResponse(result)
+
+    async def post_batch_mask(request: Request) -> Response:
+        """批量开启变量掩码（prompt 2026-10-13：全部变量 IsMasked=true，
+        掩码文本=变量名称清洗；串行执行）。"""
+        try:
+            data = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "请求体非 JSON"}, status_code=400)
+        group = str(data.get("group") or "").strip()
+        script_id = str(data.get("script_id") or "").strip()
+        try:
+            result = await run_in_threadpool(
+                batch_mask_variables, group, script_id)
+        except Exception as e:  # noqa: BLE001
+            _log_quick_error(e)
+            return JSONResponse({"error": str(e)[:300]}, status_code=500)
+        return JSONResponse(result)
+
+    async def post_publish_confirm(request: Request) -> Response:
+        """生成发布线上版本的防误操作确认码（用户名_随机6位数字，
+        内存缓存，返回前端显示（可复制）并要求用户输入确认）。"""
+        try:
+            result = await run_in_threadpool(_new_publish_confirm)
+        except Exception as e:  # noqa: BLE001
+            _log_quick_error(e)
+            return JSONResponse({"error": str(e)[:300]}, status_code=500)
+        return JSONResponse(result)
+
+    async def post_batch_publish(request: Request) -> Response:
+        """批量发布剧本（prompt 2026-10-13：串行；preview=仅测试版本、
+        preview_online=测试+线上（修改操作受配置守卫控制，需确认码）。"""
+        try:
+            data = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "请求体非 JSON"}, status_code=400)
+        group = str(data.get("group") or "").strip()
+        script_id = str(data.get("script_id") or "").strip()
+        mode = str(data.get("mode") or "preview").strip()
+        confirm_code = str(data.get("confirm_code") or "").strip()
+        try:
+            result = await run_in_threadpool(
+                batch_publish_scripts, group, script_id, mode, confirm_code)
+        except Exception as e:  # noqa: BLE001
+            _log_quick_error(e)
             return JSONResponse({"error": str(e)[:300]}, status_code=500)
         return JSONResponse(result)
 
@@ -821,44 +1535,51 @@ def build_quick_routes() -> list[Route]:
             out_dir = new_result_dir(EXPORT_DIR_SUFFIX)
             manifest: list[dict] = []
             exported = failed = 0
+            # 先收集全部项目组的剧本（prompt 2026-10-13：提前统计总体数量，
+            # 进度百分比按总量显示——不按组分段上报，避免百分比反复归零）
+            tasks: list[tuple[str, dict]] = []
             for g in selected:
                 gname = g.get("group_name") or str(g.get("id"))
                 progress.report_stage("查询项目组下的剧本", group=gname)
-                scripts = client.list_group_all_scripts(g["id"])
+                for s in client.list_group_all_scripts(g["id"]):
+                    tasks.append((gname, s))
 
-                def export_one(s: dict):
-                    sid = s.get("AgentID") or ""
-                    filename, content = client.export_script(sid)
-                    path = out_dir / safe_filename(
-                        f"{safe_filename(gname)}_{safe_filename(filename)}")
-                    path.write_bytes(content)
-                    return {"export_file": path.name,
-                            "size_bytes": len(content)}
+            def export_one(item: tuple):
+                gname, s = item
+                sid = s.get("AgentID") or ""
+                filename, content = client.export_script(sid)
+                path = out_dir / safe_filename(
+                    f"{safe_filename(gname)}_{safe_filename(filename)}")
+                path.write_bytes(content)
+                return {"export_file": path.name,
+                        "size_bytes": len(content)}
 
-                def on_progress(s: dict, index: int, total: int) -> None:
-                    # worker 线程：先标记来源，使 HTTP 请求事件同样归属
-                    progress.set_source("export")
-                    progress.report_stage(
-                        f"导出剧本 {s.get('AgentID') or ''}", group=gname,
-                        script_id=s.get("AgentID") or "",
-                        script_name=s.get("AgentName") or "",
-                        index=index, total=total)
+            def on_progress(item: tuple, index: int, total: int) -> None:
+                # worker 线程：先标记来源，使 HTTP 请求事件同样归属；
+                # index/total 为全部项目组剧本的总体进度（单轮递增不归零）
+                gname, s = item
+                progress.set_source("export")
+                progress.report_stage(
+                    f"导出剧本 {s.get('AgentID') or ''}", group=gname,
+                    script_id=s.get("AgentID") or "",
+                    script_name=s.get("AgentName") or "",
+                    index=index, total=total)
 
-                # 并发导出（prompt 2026-09-06：获得剧本后并行执行导出）
-                results = run_parallel(scripts, export_one, concurrency=c,
-                                       progress=on_progress)
-                for s, r in zip(scripts, results):
-                    sid = s.get("AgentID") or ""
-                    row = {"project_group": gname, "script_id": sid,
-                           "script_name": s.get("AgentName") or "",
-                           "agent_mode_name": agent_mode_name(
-                               s.get("AgentMode"))}
-                    if isinstance(r, tuple) and r and r[0] == "error":
-                        row["error"] = str(r[1])[:800]
-                        failed += 1
-                    else:
-                        row.update(r)
-                        exported += 1
+            # 并发导出（prompt 2026-09-06：获得剧本后并行执行导出）
+            results = run_parallel(tasks, export_one, concurrency=c,
+                                   progress=on_progress)
+            for (gname, s), r in zip(tasks, results):
+                sid = s.get("AgentID") or ""
+                row = {"project_group": gname, "script_id": sid,
+                       "script_name": s.get("AgentName") or "",
+                       "agent_mode_name": agent_mode_name(
+                           s.get("AgentMode"))}
+                if isinstance(r, tuple) and r and r[0] == "error":
+                    row["error"] = str(r[1])[:800]
+                    failed += 1
+                else:
+                    row.update(r)
+                    exported += 1
                     manifest.append(row)
             write_json(out_dir / "清单.json", {
                 "account": str(account), "total": len(manifest),
@@ -1079,6 +1800,38 @@ def build_quick_routes() -> list[Route]:
             return JSONResponse({"error": str(e)[:300]}, status_code=500)
         return JSONResponse(result)
 
+    async def post_group_scripts(request: Request) -> Response:
+        try:
+            data = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "请求体非 JSON"}, status_code=400)
+        group = str(data.get("group") or "").strip()
+        try:
+            result = await run_in_threadpool(list_group_scripts, group)
+        except Exception as e:  # noqa: BLE001
+            _log_quick_error(e)
+            return JSONResponse({"error": str(e)[:800]}, status_code=500)
+        return JSONResponse(result)
+
+    async def post_query_variables(request: Request) -> Response:
+        try:
+            data = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "请求体非 JSON"}, status_code=400)
+        group = str(data.get("group") or "").strip()
+        script_id = str(data.get("script_id") or "").strip()
+        try:
+            concurrency = int(data.get("concurrency") or 0)
+        except (TypeError, ValueError):
+            concurrency = 0
+        try:
+            result = await run_in_threadpool(
+                query_script_variables, group, script_id, concurrency)
+        except Exception as e:  # noqa: BLE001
+            _log_quick_error(e)
+            return JSONResponse({"error": str(e)[:300]}, status_code=500)
+        return JSONResponse(result)
+
     async def post_export_xlsx(request: Request) -> Response:
         try:
             data = await request.json()
@@ -1090,6 +1843,16 @@ def build_quick_routes() -> list[Route]:
         if not headers:
             return JSONResponse({"error": "缺少表头"}, status_code=400)
         filename = str(data.get("filename") or "导出")
+        # 2026-10-11 prompt：下载文件名前缀加当前火山引擎账号
+        # （如 2105888584_批量查询剧本变量_20261011_103000.xlsx；账号取
+        # 不到时不加前缀不影响导出）；最终文件名经 x-download-filename
+        # 响应头回传前端（a.download 以服务端命名为准）
+        try:
+            account = str(_get_quick_client().get_current_account())
+        except Exception:  # noqa: BLE001 - 未登录/账号获取失败不影响导出
+            account = ""
+        if account:
+            filename = f"{account}_{filename}"
         try:
             content = make_xlsx(headers, rows)
         except Exception as e:  # noqa: BLE001
@@ -1103,11 +1866,15 @@ def build_quick_routes() -> list[Route]:
             headers={
                 "content-disposition":
                     f"attachment; filename*=utf-8''{quote(filename)}.xlsx",
+                "x-download-filename": quote(filename),
+                "access-control-expose-headers": "x-download-filename",
             })
 
     return [
         Route("/api/groups", get_groups, methods=["GET"]),
         Route("/api/quick/query_scripts", post_query_scripts,
+              methods=["POST"]),
+        Route("/api/quick/query_unpublished", post_query_unpublished,
               methods=["POST"]),
         Route("/api/quick/batch_export", post_batch_export, methods=["POST"]),
         Route("/api/quick/export_dirs", get_export_dirs, methods=["GET"]),
@@ -1120,6 +1887,17 @@ def build_quick_routes() -> list[Route]:
         Route("/api/quick/deletable_scripts", post_list_deletable,
               methods=["POST"]),
         Route("/api/quick/delete_scripts", post_delete_scripts,
+              methods=["POST"]),
+        Route("/api/quick/group_scripts", post_group_scripts,
+              methods=["POST"]),
+        Route("/api/quick/query_variables", post_query_variables,
+              methods=["POST"]),
+        Route("/api/quick/query_unmasked_vars", post_query_unmasked_vars,
+              methods=["POST"]),
+        Route("/api/quick/batch_mask", post_batch_mask, methods=["POST"]),
+        Route("/api/quick/publish_confirm", post_publish_confirm,
+              methods=["POST"]),
+        Route("/api/quick/batch_publish", post_batch_publish,
               methods=["POST"]),
         Route("/api/quick/export_xlsx", post_export_xlsx, methods=["POST"]),
     ]
